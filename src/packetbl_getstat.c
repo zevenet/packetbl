@@ -7,9 +7,9 @@
 #include <unistd.h>
 #include <string.h>
 
-int main(int argc, char **argv) {
 
 #ifdef USE_SOCKSTAT
+int main(int argc, char **argv) {
 	struct sockaddr_un sockinfo;
 	char *socketpath = SOCKSTAT_PATH;
 	char buf[1024];
@@ -52,8 +52,12 @@ int main(int argc, char **argv) {
 	close(sockfd);
 
 	return 0;
+}
+
 #else
+int main() {
 	fprintf(stderr, "PacketBL was not compiled with socket statistics support!\n");
 	return 1;
-#endif
 }
+#endif
+

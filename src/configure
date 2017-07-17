@@ -3497,8 +3497,6 @@ fi
 
 
 
-
-
 # Finally, execute ACTION-IF-FOUND/ACTION-IF-NOT-FOUND:
 if test x"$acx_pthread_ok" = xyes; then
 
@@ -4169,6 +4167,18 @@ done
 
 
 
+
+
+# If linux kernel version is higher than 3.6, it return the packet to netfilter traffic if the queue is full
+KERNEL_VERSION=$(uname -r | egrep '^(3\.[6-9]|[4-9])')
+
+if [ $KERNEL_VERSION != "" ]; then
+
+cat >>confdefs.h <<\_ACEOF
+#define USE_NF_FAILOPEN /**/
+_ACEOF
+
+fi
 
 
 
@@ -5395,8 +5405,7 @@ $debug ||
 if test -n "$CONFIG_FILES"; then
 
 
-ac_cr='
-'
+ac_cr=''
 ac_cs_awk_cr=`$AWK 'BEGIN { print "a\rb" }' </dev/null 2>/dev/null`
 if test "$ac_cs_awk_cr" = "a${ac_cr}b"; then
   ac_cs_awk_cr='\\r'
