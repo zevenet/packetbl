@@ -15,14 +15,15 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+
 #include "packetbl.h"
-#include "directresolv.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+
 #include <netdb.h>
 #include <ctype.h>
 #include <syslog.h>
@@ -80,9 +81,12 @@
 
 # define CONFBUF 256
 
+# define THREAD_MAX 700
+
 #define DEBUG(x, y) if (conf.debug >= x) { printf(y "\n"); }
 struct packet_info {
 
+	//~ unsigned short int b1;
 	uint8_t b1;
 	uint8_t b2;
 	uint8_t b3;
@@ -116,7 +120,15 @@ struct config_entry {
 struct thr_arg 
 {
 	struct nfq_q_handle *queue_handle; 	 // nf_queue id
-	struct nfq_data *queue_data;			 // nf_ data
+	struct packet_info ip;
+	int id;
+};
+
+
+struct thr_parameters 
+{
+	pthread_attr_t	*thr_attr;		// argument
+	pthread_t			*thr;				// parameters
 };
 
 
@@ -142,15 +154,18 @@ struct bl_context {
 	pool_t *pool;
 };
 
+static pthread_mutex_t lock_queue;
+static pthread_mutex_t lock_cache;
+static pthread_mutex_t lock_count;
 
 // thread counter
+volatile int thread_count;
+
 static double
 cur_time(void)
 {
     return time(NULL) * 1000000.0;
 }
-
-
 
 
 enum permissions {
@@ -180,11 +195,11 @@ struct config {
 	char*	alt_domain;
 	int	debug;
 	int	queue_size;
+	int	threads_max;
 };
 static struct config conf = { 0, 0, 1, 0, LOG_DAEMON, 0, 1, NULL, NULL, 0, 0};
 
-static ldns_resolver *res = NULL;
-static ldns_resolver *res_local = NULL;
+
 // struct to save regexp of domain
 static regex_t regex;
 
@@ -206,14 +221,14 @@ struct packet_cache_t {
 	time_t	expires;
 	int	action;
 };
-struct packet_cache_t *packet_cache = NULL;
+volatile struct packet_cache_t *packet_cache = NULL;
 uint32_t packet_cache_len = USE_CACHE_DEF_LEN;
 uint16_t packet_cache_ttl = USE_CACHE_DEF_TTL;
 #endif
 
 struct config_entry *hostlistcache = NULL;
 
-int get_packet_info(char *payload, struct packet_info *ip);
+int get_packet_info(unsigned char *payload, struct packet_info *ip);
 
 int check_packet_list(const struct packet_info *ip, struct config_entry *list);
 int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list);
@@ -230,6 +245,7 @@ static void pbl_set_verdict(struct PBL_HANDLE *h, PBL_ID_T id,
 static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
         struct nfq_data *nfa, void *thread_hd);
 void pbl_callback(void *data);
+		
 	
 static const configoption_t options[] = {
 	{"<host>", ARG_NONE, host_section_open, NULL, O_ROOT},
@@ -252,6 +268,7 @@ static const configoption_t options[] = {
 	{"logfacility", ARG_STR, facility_option, NULL, O_ROOT},
 	{"queueno", ARG_INT, toggle_option, NULL, O_ROOT},
 	{"queuesize", ARG_INT, toggle_option, NULL, O_ROOT},
+	{"threadmax", ARG_INT, toggle_option, NULL, O_ROOT},
 	//~ LAST_OPTION
 };
 
@@ -261,6 +278,8 @@ FUNC_ERRORHANDLER(error_handler) {
 	return 1;
 
 }
+
+
 
 /*
  * SYNOPSIS:
@@ -425,8 +444,9 @@ static uint32_t packet_info_to_ip(const struct packet_info ip) {
  *
  */
 int packet_check_ip(const struct packet_info ip) {
-	int retval;
-
+	
+	int retval = NF_ACCEPT;
+	struct pbl_stat_info *statics_pointer = &statistics; 
 #ifdef USE_CACHE
 	uint32_t ipaddr_check;
 	uint32_t cache_hash = 0;
@@ -448,11 +468,11 @@ int packet_check_ip(const struct packet_info ip) {
 			switch (retval) {
 				case NF_DROP:
 					actionstr="reject";
-					statistics.cachereject++;
+					statics_pointer->cachereject++;
 					break;
 				case NF_ACCEPT:
 					actionstr="accept";
-					statistics.cacheaccept++;
+					statics_pointer->cacheaccept++;
 					break;
 				default:
 					actionstr="???";
@@ -476,6 +496,7 @@ int packet_check_ip(const struct packet_info ip) {
 	 * calls because of the possibility they could screw with
 	 * msgbuf.  They shouldn't, really, but better safe than
 	 * sorry, at least for now. */
+	 
 	if (check_packet_list(&ip, whitelist) == 1) {
 		get_ip_string(&ip);
 		if (!conf.quiet) {
@@ -489,7 +510,7 @@ int packet_check_ip(const struct packet_info ip) {
 						msgbuf);
 			}
 		}
-		statistics.whitelisthits++;
+		statics_pointer->whitelisthits++;
 		retval=NF_ACCEPT;
 	} else
 	if (check_packet_list(&ip, blacklist) == 1) {
@@ -506,7 +527,7 @@ int packet_check_ip(const struct packet_info ip) {
 			}
 				
 		}
-		statistics.blacklisthits++;
+		statics_pointer->blacklisthits++;
 		retval=NF_DROP;
 	} else
 	if (check_packet_dnsbl(&ip, whitelistbl) == 1) {
@@ -522,7 +543,7 @@ int packet_check_ip(const struct packet_info ip) {
 						msgbuf);
 			}
 		}
-		statistics.whitelistblhits++;
+		statics_pointer->whitelistblhits++;
 		retval=NF_ACCEPT;
 	} else
 	if (check_packet_dnsbl(&ip, blacklistbl) == 1) {
@@ -538,7 +559,7 @@ int packet_check_ip(const struct packet_info ip) {
 						msgbuf);
 			}
 		}
-		statistics.blacklistblhits++;
+		statics_pointer->blacklistblhits++;
 		retval=NF_DROP;
 	} else {
 		get_ip_string(&ip);
@@ -570,16 +591,18 @@ int packet_check_ip(const struct packet_info ip) {
 			}
 			retval=NF_DROP;
 		}
-		statistics.fallthroughhits++;
+		statics_pointer->fallthroughhits++;
 	}
 
 #ifdef USE_CACHE
+	pthread_mutex_lock(&lock_cache);
 	/* Put current action into the cache. */
 	if (packet_cache != NULL) {
 		packet_cache[cache_hash].ipaddr = ipaddr_check;
 		packet_cache[cache_hash].action = retval;
 		packet_cache[cache_hash].expires = currtime + packet_cache_ttl;
 	}
+	pthread_mutex_unlock(&lock_cache);
 #endif
 
 	return retval;
@@ -588,19 +611,65 @@ int packet_check_ip(const struct packet_info ip) {
 
 void pbl_callback( void*arguments ) {
 
-	int ret;
-	int id=0;
+	int ret=0;
 	struct nfqnl_msg_packet_hdr *ph=NULL;
-#if NETFILTERQUEUE_VERSION_NUMBER == 0
-	char *nfdata;
-#else
-	unsigned char *nfdata;
-#endif
-	struct packet_info ip;
+	
+	pthread_mutex_lock(&lock_count);
+	thread_count++;
+	syslog(LOG_INFO,
+					"Thread openned [%d]",
+						thread_count);
+	pthread_mutex_unlock(&lock_count);
 
 	// function parameters 
+	struct packet_info ip;
 	struct nfq_q_handle *qh = ((struct thr_arg *)arguments)->queue_handle;
-	struct nfq_data *nfa = ((struct thr_arg *)arguments)->queue_data;
+	int id = ((struct thr_arg *)arguments)->id;
+	
+	memcpy(&ip, &((struct thr_arg *)arguments)->ip, sizeof( struct packet_info ));
+	
+	free(arguments);
+	arguments=NULL;
+
+	ret = packet_check_ip(ip);
+	
+	if (ret == NF_ACCEPT || ret == NF_DROP)
+	{
+		if (conf.debug >= 2) {
+			printf ("Got packet from %hhu.%hhu.%hhu.%hhu: %d\n", ip.b1, ip.b2, ip.b3, ip.b4, ret);
+		}
+		pbl_set_verdict(qh, id, ret);
+	}
+	
+	pthread_mutex_lock(&lock_count);
+	thread_count--;
+	syslog(LOG_INFO,
+					"Thread clossed [%d]",
+						thread_count);
+	pthread_mutex_unlock(&lock_count);
+
+	return;
+}
+
+
+
+
+// Create a new thread for the current packet
+static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+        struct nfq_data *nfa, void *thread_attr) {
+
+	// Creating thread parameters
+	struct thr_arg *argp=NULL;
+	int id = 0;
+	int ret=0;
+	struct nfqnl_msg_packet_hdr *ph=NULL;
+#if NETFILTERQUEUE_VERSION_NUMBER == 0
+	char *nfdata=NULL;
+#else
+	unsigned char *nfdata=NULL;
+#endif
+	struct packet_info ip;
+	
 	
 	ph = nfq_get_msg_packet_hdr(nfa);
 	if (ph != NULL ) {
@@ -610,35 +679,44 @@ void pbl_callback( void*arguments ) {
 	ret = nfq_get_payload(nfa, &nfdata);
 	/* what return codes here? */
 
-	ret = get_packet_info( (char*)nfdata, &ip);
+	ret = get_packet_info( nfdata, &ip);
+	pthread_mutex_unlock(&lock_queue);
 	if (ret == -1) {
 		pbl_set_verdict(qh, id, NF_ACCEPT);
+		syslog(LOG_ERR, "Error reading packet. Accepting packet.");
+		return 1;
 	}
-
-	ret = packet_check_ip(ip);
 	
-	if (conf.debug >= 2) {
-	printf ("Got packet from %hhu.%hhu.%hhu.%hhu: %d\n", ip.b1, ip.b2, ip.b3, ip.b4, ret);
-	}
-	pbl_set_verdict(qh, id, ret);
-}
-
-// Create a new thread for the current packet
-static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-        struct nfq_data *nfa, void *thread_hd) {
-
-	struct thr_arg argp;
-	argp.queue_handle = qh;
-	argp.queue_data = nfa;
-
-	if ( pthread_create( (pthread_t*)thread_hd, NULL, (void*)pbl_callback, (void *)&argp) )
+	if (conf.threads_max)
 	{
-		syslog(LOG_ERR, "Error creating thread.");
+		pthread_mutex_lock(&lock_count);
+		if ( thread_count > conf.threads_max ){
+			pthread_mutex_unlock(&lock_count);
+			pbl_set_verdict(qh, id, NF_ACCEPT);
+			syslog(LOG_ERR, "Thread queue full. Accepting packet.");
+			return 1;
+		}
+		pthread_mutex_unlock(&lock_count);
 	}
 
+	if((argp = malloc(sizeof(struct thr_arg))) == NULL) {
+				pbl_set_verdict(qh, id, NF_ACCEPT);
+		syslog(LOG_ERR, "thr_arg malloc");
+        return 1;
+    }
+	
+	argp->queue_handle = qh;
+	argp->id = id;
+	memcpy(&argp->ip, &ip, sizeof( struct packet_info ));
+
+	if ( pthread_create( ((struct thr_parameters  *)thread_attr)->thr, ( (struct thr_parameters  *)thread_attr)->thr_attr, (void *)&pbl_callback, (void *)argp) != 0 )
+	{
+		free(argp);
+		pbl_set_verdict(qh, id, NF_ACCEPT);
+		syslog(LOG_ERR, "Error creating thread: %d.",thread_count);
+	}
 	return 0;
 }
-
 
 
 
@@ -667,12 +745,13 @@ static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
  */
 static void pbl_set_verdict(struct PBL_HANDLE *h, PBL_ID_T id,
 	unsigned int verdict) {
-
+	pthread_mutex_lock(&lock_queue);
 	if (conf.dryrun == 1) {
 		SET_VERDICT(h, id, NF_ACCEPT, 0, NULL);
 	} else {
 		SET_VERDICT(h, id, verdict, 0, NULL);
 	}
+	pthread_mutex_unlock(&lock_queue);
 }
 
 /*
@@ -710,17 +789,22 @@ int main(int argc, char **argv) {
 	int rv;
 	char work_directory[1024];
 	
+	pthread_attr_t	thr_attr;
+	pthread_t			thr;
+	
 #ifdef USE_NF_FAILOPEN
 	uint32_t flags = NFQA_CFG_F_FAIL_OPEN;
-    	uint32_t mask = NFQA_CFG_F_FAIL_OPEN;
+    uint32_t mask = NFQA_CFG_F_FAIL_OPEN;
 #endif
 	
-	// threads variables	
-	pthread_t           main_thr;
-	pthread_attr_t      main_thr_attr;
+	struct thr_parameters  new_thr_arg;
+	new_thr_arg.thr = &thr;
+	new_thr_arg.thr_attr = &thr_attr;	
+	thread_count=0;
 
 	// debug level
 	conf.debug = 0;
+	conf.threads_max= 0;
 
 	if (stat("/proc/net/netfilter/nfnetlink_queue", &fbuf) == ENOENT) {
 		fprintf(stderr, "Please make sure you have\ncompiled a kernel with the Netfilter QUEUE target built in, or loaded the appropriate module.\n");
@@ -773,29 +857,12 @@ int main(int argc, char **argv) {
 	packet_cache_clear();
 #endif
 
-	// creating local resovler
-	if ((configure_direct_nameserver( &res_local, NULL )) == -1) {
-		syslog(LOG_ERR, "Load local resovler failed.");
-		DEBUG(1, "Error loading local DNS resolvers");
-		exit(EXIT_FAILURE);
-	}
-
 	// Creating alternative nameservers to do request directly to zevenet domain
 	if (conf.alt_domain && conf.alt_resolv_file)
 	{
 		getcwd(work_directory, sizeof(work_directory));
 		if ( conf.debug > 0)
-			fprintf(stderr, "Loading nameserver file from: %s%s.\n", work_directory, conf.alt_resolv_file);
-		
-		if ((configure_direct_nameserver( &res, conf.alt_resolv_file )) == -1) {
-			syslog(LOG_ERR, "Load nameservers failed, continue without alternative nameservers.");
-			DEBUG(1, "configure_direct_nameserver error");
-		}
-		if (res==NULL)
-		{
-			DEBUG(2, "Optional nameservers has not been saved");
-			exit(EXIT_FAILURE);
-		}
+			syslog(LOG_INFO, "Loading nameserver file from: %s%s.\n", work_directory, conf.alt_resolv_file);
 	
 		// creating regexp to compare request domain with a specific domain
 		if ( regcomp(&regex, conf.alt_domain, 0) != 0 )
@@ -803,12 +870,12 @@ int main(int argc, char **argv) {
 			syslog(LOG_ERR, "Create regexp failed");
 			exit(EXIT_FAILURE);
 		}
-	}
+		
+	}	
 	
 	/* thread stuff */
-    pthread_attr_init(&main_thr_attr);
-    pthread_attr_setdetachstate(&main_thr_attr, PTHREAD_CREATE_DETACHED);
-	
+    pthread_attr_init(&thr_attr);
+    pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
 	
 	// initializing nfqueue
 	DEBUG(2, "Creating nfq handle...");
@@ -830,7 +897,7 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 	DEBUG(2, "creating queue...");
-	if ((handle = nfq_create_queue(h, conf.queueno, &callback_threads, (void*)&main_thr)) == NULL) {
+	if ((handle = nfq_create_queue(h, conf.queueno, &callback_threads, (void*)&new_thr_arg)) == NULL) {
 		syslog(LOG_ERR, "nfq_create_queue failed");
 		DEBUG(1, "nfq_create_queue failed");
 		exit(EXIT_FAILURE);
@@ -868,7 +935,7 @@ int main(int argc, char **argv) {
 	
 	syslog(LOG_INFO, "packetbl started successfully");
 	DEBUG(1, "packetbl started successfully");
-
+	
 	/* main packet processing loop.  This loop should never terminate
 	 * unless a signal is received or some other unforeseen thing
 	 * happens.
@@ -881,13 +948,18 @@ int main(int argc, char **argv) {
 
 		DEBUG(2, "waiting for a packet...");
 		while ((rv = recv(fd, buf, sizeof(buf), 0)) > 0) {
-			DEBUG(2, "Handling a packet");
-			nfq_handle_packet(h, buf, rv);
+			if (rv>0)
+			{
+				pthread_mutex_lock(&lock_queue);
+				DEBUG(2, "Handling a packet");
+				nfq_handle_packet(h, buf, rv);
+			}
 		}
 		DEBUG(2, "Packet got.");
 		statistics.totalpackets++;
 
 	}
+	
 }
 
 /*
@@ -910,10 +982,14 @@ int main(int argc, char **argv) {
  *   data from the "packet" parameter.
  *
  */
+#if NETFILTERQUEUE_VERSION_NUMBER == 0
 int get_packet_info(char *payload, struct packet_info *ip) {
+#else
+int get_packet_info(unsigned char *payload, struct packet_info *ip) {
+#endif
 
 	int version;
-	int ip_header_length, header_size;;
+	int ip_header_length, header_size;
 
 	if (ip == NULL || payload == NULL) {
 		return -1;
@@ -935,6 +1011,7 @@ int get_packet_info(char *payload, struct packet_info *ip) {
 	if (version != 4) {
 		return -1;
 	}
+
 
 	/* IP Address			Bytes 13 - 16 of IP header */
 	ip->b1 = payload[12];
@@ -1023,6 +1100,7 @@ void parse_config( void ) {
 
 
 
+
 void print_help ( void )
 {
 	printf ("Usage: packetbl [OPTION]...\n\
@@ -1033,6 +1111,8 @@ void print_help ( void )
 	-V\t\t- Show packetbl version	\n\
 	-d\t- Run packetbl in debug mode \n");
 }
+
+
 
 
 /*
@@ -1138,7 +1218,7 @@ DOTCONF_CB(toggle_option) {
 	}
 	if (strcasecmp(cmd->name, "queueno") == 0) {
 		if (cmd->data.value < 0) {
-			fprintf(stderr, "Error parsing config: queueno cannot be a negative value\n");
+			syslog(LOG_ERR, "Error parsing config: queueno cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		conf.queueno = cmd->data.value;
@@ -1146,7 +1226,7 @@ DOTCONF_CB(toggle_option) {
 	}	
 	if (strcasecmp(cmd->name, "queuesize") == 0) {
 		if (cmd->data.value < 0) {
-			fprintf(stderr, "Error parsing config: queuesize cannot be a negative value\n");
+			syslog(LOG_ERR, "Error parsing config: queuesize cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		conf.queue_size = cmd->data.value;
@@ -1154,6 +1234,18 @@ DOTCONF_CB(toggle_option) {
 	}	
 	if (strcasecmp(cmd->name, "quiet") == 0) {
 		conf.quiet = cmd->data.value;
+		return NULL;
+	}	
+	if (strcasecmp(cmd->name, "threadmax") == 0) {
+		if (cmd->data.value <= 0) {
+			syslog(LOG_ERR, "Error parsing config: threadmax cannot be a negative or null value\n");
+			exit(EXIT_FAILURE);
+		}
+		if (cmd->data.value <= THREAD_MAX) {
+			syslog(LOG_ERR, "Error parsing config: threadmax cannot have a value higher than %d\n",THREAD_MAX);
+			exit(EXIT_FAILURE);
+		}
+		conf.threads_max = cmd->data.value;
 		return NULL;
 	}	
 	if (strcasecmp(cmd->name, "alternativedomain") == 0) {
@@ -1177,7 +1269,7 @@ DOTCONF_CB(toggle_option) {
 #ifdef USE_CACHE
 	if (strcasecmp(cmd->name, "cachettl") == 0) {
 		if (cmd->data.value < 0) {
-			fprintf(stderr, "Error parsing config: cachettl cannot be a negative value\n");
+			syslog(LOG_ERR, "Error parsing config: cachettl cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		packet_cache_ttl = cmd->data.value;
@@ -1185,7 +1277,7 @@ DOTCONF_CB(toggle_option) {
 	}
 	if (strcasecmp(cmd->name, "cachesize") == 0) {
 		if (cmd->data.value < 0) {
-			fprintf(stderr, "Error parsing config: cachelen cannot be a negative value\n");
+			syslog(LOG_ERR, "Error parsing config: cachelen cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		packet_cache_len = cmd->data.value;
@@ -1528,8 +1620,11 @@ int validate_blacklist(char *str) {
 int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) {
 
 	struct config_entry *wltmp = NULL;
+	int aux;
 #ifdef	HAVE_FIREDNS
 	struct in_addr *host;
+#else
+	struct hostent *host;
 #endif
 
 	// Set time, for debug
@@ -1545,34 +1640,58 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 
 	wltmp = list;
 	
+	// Creating resolvers
+	ldns_resolver *res_opt=NULL;
+	ldns_resolver *res_def=NULL;
+	if (conf.alt_domain && conf.alt_resolv_file)
+	{
+		configure_direct_nameserver(&res_opt,conf.alt_resolv_file);
+		if (res_opt==NULL)
+		{
+			syslog(LOG_ERR, "Create optional nameservers failed");
+			return 0;
+		}
+		configure_direct_nameserver(&res_def,NULL);
+		if (res_def==NULL)
+		{
+			syslog(LOG_ERR, "Create default nameservers failed");
+			return 0;
+		}
+	}	
+
+
 	while (1) {
 
 		char lookupbuf[BUFFERSIZE];
 	
 		snprintf(lookupbuf, sizeof(lookupbuf), "%hhu.%hhu.%hhu.%hhu.%s", ip->b4, ip->b3, ip->b2, ip->b1,
-			wltmp->string);		
+			wltmp->string);
 
-		// If domain contains zevenet domain, send it directly to zevenet nameserver
-		if( ( res != NULL  && conf.alt_domain != NULL) && 
-			( regexec(&regex, wltmp->string, (size_t) 0, NULL, 0) != REG_NOMATCH ) )
+
+		if( regexec(&regex, wltmp->string, (size_t) 0, NULL, 0) != REG_NOMATCH ) 
 		{
 			DEBUG(1, "Sending to optional DNS");
-			if ( direct_dns_resolv ( res, lookupbuf ) )
+
+			if (dns_query(res_opt,lookupbuf))
 			{
 				// found
-				if (conf.debug > 0)
+				if (conf.debug > 1)
 				{
 					end_req = cur_time();
 					syslog(LOG_ERR, "finish tread, thread time (%.3f sec)",	(end_req - start_req) / 1000000.0);
 				}
+				ldns_resolver_deep_free(res_opt);
+				ldns_resolver_deep_free(res_def);
 				return 1;
 			}
 		}
 		else
 		{
+			
 			DEBUG(1, "Sending to default DNS");
 #ifndef HAVE_FIREDNS
-			if ( ! direct_dns_resolv ( res_local, lookupbuf ) ){
+			if (!dns_query(res_def,lookupbuf) )
+			{
 #else
 			host = firedns_resolveip4(lookupbuf);
 			if (host == NULL) {
@@ -1580,32 +1699,39 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 				;
 			} else {
 				// found.
-				if (conf.debug > 0)
+				if (conf.debug > 1)
 				{
 					end_req = cur_time();
 					syslog(LOG_ERR, "finish tread, thread time (%.3f sec)",	(end_req - start_req) / 1000000.0);
 				}
+				ldns_resolver_deep_free(res_opt);
+				ldns_resolver_deep_free(res_def);
 				return 1;
 			}
 		}
 		
 		if (wltmp->next == NULL) {
 			/* Termination case */
-			if (conf.debug > 0)
+			if (conf.debug > 1)
 			{
 				end_req = cur_time();
 				syslog(LOG_ERR, "finish tread, thread time (%.3f sec)",	(end_req - start_req) / 1000000.0);
 			}
+			ldns_resolver_deep_free(res_opt);
+				ldns_resolver_deep_free(res_def);
 			return 0;
 		}
 
 		wltmp = wltmp->next;
 	}
-	if (conf.debug > 0)
+	if (conf.debug > 1)
 	{
 		end_req = cur_time();
 		syslog(LOG_ERR, "finish tread, thread time (%.3f sec)",	(end_req - start_req) / 1000000.0);
 	}
+	
+	ldns_resolver_deep_free(res_opt);
+	ldns_resolver_deep_free(res_def);
 	return 0;
 }
 
@@ -1636,7 +1762,8 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 
 	struct config_entry *wltmp = NULL;
-	uint32_t ip_proc;
+	uint32_t ip_proc=0;
+
 
 	if (ip == NULL || list == NULL) {
 		return 0;
@@ -1646,12 +1773,11 @@ int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 	ip_proc |= ip->b2 << 16;
 	ip_proc |= ip->b3 << 8;
 	ip_proc |= ip->b4;
-
+	
 	wltmp = list;
 
 	while (1) {
 		uint32_t p = 0;
-
 		p = ip_proc;
 		p &= wltmp->cidr.processed;
 
