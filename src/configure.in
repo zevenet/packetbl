@@ -1,0 +1,98 @@
+
+AC_INIT(packetbl, 0.6-beta4)
+
+AC_ARG_WITH(firedns, 
+	AC_HELP_STRING([--with-firedns], [If enabled, firedns is used for the name resolution]),
+	[ac_cv_use_firedns=yes], [ac_cv_use_firedns=no])
+
+AC_ARG_WITH(cache,
+	AC_HELP_STRING([--with-cache], [If enabled, a caching mechanism is used.]),
+	[ac_cv_use_cache=yes], [ac_cv_use_cache=no])
+
+AC_CANONICAL_TARGET
+
+AC_MSG_CHECKING(operating system type)
+
+case $target in
+*-*-linux-*)
+	AC_MSG_RESULT(linux)
+	ac_cv_target_ok=yes
+	;;
+*)
+	AC_MSG_RESULT(not linux)
+	;;
+esac
+
+if test "$ac_cv_target_ok" != "yes" ; then
+	AC_MSG_ERROR(This program can only be compiled under Linux.)
+fi
+
+AC_PROG_CC
+AC_PROG_INSTALL
+
+AC_ARG_WITH(stats, AC_HELP_STRING([--with-stats], [Enable statistics collection packetbl_getstat]), [
+	ACX_PTHREAD([
+		AC_DEFINE(HAVE_THREADING, [], [Enable if you have threading support])
+		AC_DEFINE(USE_SOCKSTAT, [], [Enable if you want to use socket statistics])
+	])
+])
+
+AC_ARG_WITH(stats-socket, AC_HELP_STRING([--with-stats-socket], [define a location for the stats socket]), [
+	if test "$withval+set" != "set"; then
+		AC_DEFINE_UNQUOTED(SOCKSTAT_PATH, ["$withval"], [Define the path of the stats socket])
+	fi
+	])
+	
+
+AC_CHECK_HEADERS(libipq.h stdlib.h stdio.h string.h netinet/in.h netinet/tcp.h resolv.h netdb.h ctype.h syslog.h sys/stat.h sys/types.h unistd.h getopt.h dotconf.h libpool.h time.h)
+
+AC_CHECK_LIB(pool, pool_free, [
+	AC_DEFINE(HAVE_POOL, [], [Enable if you have the required pool library])
+	LIBS="$LIBS -lpool"
+], [
+	AC_MSG_FAILURE([You must have dotconf (libpool), find it here: http://www.azzit.de/dotconf/])
+])
+
+AC_CHECK_LIB(dotconf, dotconf_create, [
+	AC_DEFINE(HAVE_DOTCONF, [], [Enable if you have the required dotconf library.])
+	LIBS="$LIBS -ldotconf"
+], [
+	AC_MSG_FAILURE([You must have dotconf, find it here: http://www.azzit.de/dotconf/])
+])
+
+AC_CHECK_LIB(netfilter_queue, nfq_set_verdict, [
+	AC_DEFINE(HAVE_NFQUEUE, [], [Enable if you have nfqueue])
+	LIBS="$LIBS -lnetfilter_queue"
+	have_nfqueue='yes'
+])
+
+if test "$have_nfqueue" != 'yes'; then
+	AC_MSG_FAILURE([nfqueue was not found.])
+fi
+
+AC_MSG_CHECKING(whether to use firedns)
+if test "$ac_cv_use_firedns" == "yes" ; then
+	AC_MSG_RESULT(yes)
+	AC_CHECK_LIB(firedns, firedns_resolveip4, [
+		AC_DEFINE(HAVE_FIREDNS, [], [Enable if you have the optional firedns library])
+		LIBS="$LIBS -lfiredns"
+	], [
+		AC_MSG_FAILURE([You asked for firedns, but the libraries aren't installed.  Install them, then rerun configure.])
+	])
+else
+	AC_MSG_RESULT(no)
+fi
+
+AC_MSG_CHECKING(whether caching is enabled)
+if test "$ac_cv_use_cache" == "yes" ; then
+	AC_MSG_RESULT(yes)
+	AC_DEFINE(USE_CACHE, [], [Enable if you want to use a caching mechanism.])
+else
+	AC_MSG_RESULT(no)
+fi
+
+AC_CONFIG_FILES([Makefile])
+AC_CONFIG_HEADERS([config.h])
+AC_OUTPUT
+
+# vim:syntax=off

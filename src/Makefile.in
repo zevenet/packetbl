@@ -1,0 +1,50 @@
+
+# @configure_input@
+
+prefix  = @prefix@
+bindir	= $(prefix)/bin
+sysconfdir	= $(prefix)/etc
+CONFIGFILE	= $(sysconfdir)/packetbl.conf
+INSTALL	= @INSTALL@
+TARGET	= packetbl
+
+CFLAGS	= @CFLAGS@ @PTHREAD_CFLAGS@
+LDFLAGS = @LDFLAGS@
+DEFS	= @DEFS@ -DCONFIGFILE=\"$(CONFIGFILE)\"
+LIBS	= @LIBS@ @PTHREAD_LIBS@
+CC	= @CC@
+INCLUDES	= -I /usr/include/libnetfilter_queue
+
+
+all: packetbl packetbl_getstat
+
+packetbl: packetbl.o
+	$(CC) $(CFLAGS) $(LDFLAGS) packetbl.o -o packetbl $(LIBS)
+
+packetbl_getstat: packetbl_getstat.o
+	$(CC) $(CFLAGS) $(LDFLAGS) packetbl_getstat.o -o packetbl_getstat $(LIBS)
+
+packetbl.o: config.h packetbl.c packetbl.h
+	$(CC) $(CFLAGS) -c $(DEFS) packetbl.c -o packetbl.o $(INCLUDES)
+
+packetbl_getstat.o: config.h packetbl_getstat.c packetbl.h
+	$(CC) $(CFLAGS) -c $(DEFS) packetbl_getstat.c -o packetbl_getstat.o
+
+clean:
+	-rm -f packetbl.o packetbl packetbl_getstat.o packetbl_getstat
+
+distclean:
+	-rm -f Makefile packetbl.o packetbl packetbl_getstat.o packetbl_getstat config.log config.status config.h
+
+install: all
+	-$(INSTALL) -d $(bindir)
+	-$(INSTALL) -d $(sysconfdir)
+	@if [ -f "$(CONFIGFILE)" ]; then \
+	echo "$(INSTALL) -m 644 config $(CONFIGFILE).dist"; \
+	$(INSTALL) -m 644 config $(CONFIGFILE).dist;  \
+	else \
+	echo "$(INSTALL) -m 644 config $(CONFIGFILE)"; \
+	$(INSTALL) -m 644 config $(CONFIGFILE);  \
+	fi
+	$(INSTALL) -m 755 packetbl $(bindir)/packetbl
+	$(INSTALL) -m 755 packetbl_getstat $(bindir)/packetbl_getstat

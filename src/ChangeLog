@@ -1,0 +1,37 @@
+7/25/04
+- Changed over to autoconf 
+(thanks to Roy Keene (packetbl at rkeene dot org) for his assistance,
+even though this was in the works before he sent his patch, I was able to
+use many of his tests)
+
+6/22/04
+- Added support for DryRun mode
+- Won't handle any packets outside of port 25 unless a config option is set
+- Added firedns support
+- Added support for different log facilities.
+
+5/28/04
+- Added support for reject fallthrough
+- Put IP address in fallthrough
+- Compiles cleaner under Wall
+- Removed the README stuff and changed it with the wiki info.
+
+4/26/04
+- Fixed another error handling bug, this time in ipq_read.
+- Increased buffer size from BUFSIZ to 65536.
+- Added check to ensure that the QUEUE target is loaded.
+- Removed references to BSD.
+- Commented out temporarily the requirement that bls resolve. Will add back
+in as an option eventually.
+
+4/23/04
+- Fixed bug in reporting the error coming from ipq_set_mode.
+
+2/04/04
+- Added rudimentary caching algorithm.
+
+1/31/04
+- Modified to compile cleaner with -Wall
+- Put daemonize after parse_config so error messages don't get swallowed up
+- made the config file into a #define
+- Changes to documentation 
