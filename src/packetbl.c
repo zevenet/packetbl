@@ -115,6 +115,13 @@ struct config_entry *whitelistbl = NULL;
 struct config_entry *blacklist = NULL;
 struct config_entry *whitelist = NULL;
 
+// Execution parameters
+// Only check configuration file
+int arg_debug = 0;
+int arg_quiet = 0;
+char * packetbl_configfile = NULL;
+char * packetbl_pidfile = NULL;
+
 // to query to a alternative nameserver
 static char alt_nameserver_file [CONFBUF];
 static char alt_domain [CONFBUF];
@@ -191,7 +198,8 @@ int check_packet_list(const struct packet_info *ip, struct config_entry *list);
 int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list);
 int parse_cidr(struct config_entry *ce);
 /* int validate_blacklist(char *); */
-void parse_config(void);
+void parse_config( void );
+void print_help ( void );
 void parse_arguments(int argc, char **argv);
 void pbl_init_sockstat(void);
 static void get_ip_string(const struct packet_info *ip);
@@ -220,9 +228,7 @@ static const configoption_t options[] = {
 	{"cachesize", ARG_INT, toggle_option, NULL, O_ROOT},
 #endif
 	{"logfacility", ARG_STR, facility_option, NULL, O_ROOT},
-#ifdef HAVE_NFQUEUE
-	{"queueno", ARG_INT, common_option, NULL, O_ROOT},
-#endif
+	{"queueno", ARG_INT, toggle_option, NULL, O_ROOT},
 	LAST_OPTION
 };
 
@@ -246,7 +252,8 @@ FUNC_ERRORHANDLER(error_handler) {
 void daemonize(void) {
 
 	pid_t pid;
-
+	FILE *pidf;
+	
 	chdir("/");
 
 	close(STDIN_FILENO);
@@ -258,6 +265,13 @@ void daemonize(void) {
 	pid = fork();
 
 	if (pid > 0) {
+		pidf = fopen ( packetbl_pidfile , "w");
+		if (!pidf) {
+			syslog(LOG_ERR, "Can't write PID %d to %s", (int)pid, packetbl_pidfile);
+		} else {
+			fprintf(pidf, "%d\n", (int)pid);
+			fclose(pidf);
+		}
 		exit(EXIT_SUCCESS);
 	}
 	if (pid < 0) {
@@ -659,13 +673,22 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	/* Parse our configuration data. */
-	parse_config();
 
-
-	/* We parse arguments after parsing the config file so we can override the
-	   config file. */
+	/* Parse execution arguments. */
 	parse_arguments(argc, argv);
+
+	/* Parse our configuration data. */
+	parse_config( );
+	
+	if ( arg_debug == 1 )
+	{
+		conf.debug++;
+	}
+	if ( arg_quiet == 1 )
+	{
+		conf.quiet = 1;
+	}
+
 
 	if (conf.debug > 0) {
 		fprintf(stderr, "Debug level %d\n", conf.debug);
@@ -698,8 +721,6 @@ int main(int argc, char **argv) {
 
 	// Creating alternative nameservers to do request directly to zevenet domain
 	
-		//~ syslog(LOG_ERR, "Domain: %s",conf.alt_domain);
-		//~ syslog(LOG_ERR, "nameserver file: %s",conf.alt_resolv_file);
 	if ((configure_direct_nameserver( &res, conf.alt_resolv_file )) == -1) {
 		syslog(LOG_ERR, "Load nameservers failed");
 		DEBUG(1, "configure_direct_nameserver error");
@@ -863,7 +884,7 @@ int get_packet_info(char *payload, struct packet_info *ip) {
 }
 /*
  * SYNOPSIS:
- *   void parse_config(void);
+ * void parse_config( void );
  *
  * ARGUMENTS:
  *   (none)
@@ -878,28 +899,55 @@ int get_packet_info(char *payload, struct packet_info *ip) {
  *   it should only be called during start-up and not from the main loop.
  *
  */
-void parse_config(void) {
+void parse_config( void ) {
 
-	configfile_t *configfile;
+	configfile_t *configfilehandle;
 	struct bl_context context;
 
 	context.pool = pool_new(NULL);
-	configfile = dotconf_create(CONFIGFILE, options, (void *)&context,
-		CASE_INSENSITIVE);
-	if (!configfile) {
+	
+	if ( packetbl_configfile == NULL )
+	{
+		configfilehandle = dotconf_create(CONFIGFILE, options, (void *)&context,
+			CASE_INSENSITIVE);
+	}
+	else
+	{
+		configfilehandle = dotconf_create(packetbl_configfile, options, (void *)&context,
+			CASE_INSENSITIVE);
+	}
+	
+	if (!configfilehandle) {
 		fprintf(stderr, "Error opening config file\n");
 		exit(EXIT_FAILURE);
 	}
-	if (dotconf_command_loop(configfile) == 0) {
+	
+	if (dotconf_command_loop(configfilehandle) == 0) {
 		fprintf(stderr, "Error reading configuration file\n");
 		exit(EXIT_FAILURE);
 	}
 
-	dotconf_cleanup(configfile);
+	dotconf_cleanup(configfilehandle);
 	pool_free(context.pool);
 
 	return;
 }
+
+
+void print_help ( void )
+{
+	printf ("Usage: packetbl [OPTION]...\n\
+	-h\t\t- Show this help	\n\
+	-f <FILE>\t- Chose a config file\n\
+	-q\t\t- Run the binary in quiet mode, packetbl does not log the veredict\n\
+	-p <FILE>\t- Set a PID file \n\
+	-V\t\t- Show packetbl version	\n\
+	-d\t- Run packetbl in debug mode \n");
+}
+
+
+
+
 /*
  * SYNOPSIS:
  *   void parse_arguments(
@@ -926,21 +974,48 @@ void parse_config(void) {
 void parse_arguments(int argc, char **argv) {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "qVd")) != -1) {
+	while ((ch = getopt(argc, argv, "hf:qp:Vd")) != -1) {
 		switch (ch) {
-			case 'q':
-				conf.quiet = 1;
-				break;
-			case 'V':
-				printf("PacketBL version %s\n", PACKAGE_VERSION);
+			// print packetbl help
+			case 'h':
+				print_help();
 				exit(EXIT_SUCCESS);
 				break;
+			// no loggin packetbl veredict
+			case 'q':
+				arg_quiet = 1;
+				break;
+			// print packetbl version
+			case 'V':
+				printf("%s\n", PACKAGE_VERSION);
+				exit(EXIT_SUCCESS);
+				break;
+			// use a specific config file
+			case 'f':
+				packetbl_configfile = optarg;
+				// check if the file exists
+				if( access( packetbl_configfile, F_OK ) == -1 )
+				{
+					printf( "The configuration file %s doesn't exist\n", packetbl_configfile );
+					exit(EXIT_FAILURE);
+				}
+				break;
+			case 'p':
+				packetbl_pidfile = optarg;
+				// check if the file exists
+				if( access( packetbl_pidfile, F_OK ) != -1 )
+				{
+					printf( "The pid file %s already exist\n", packetbl_pidfile );
+					exit(EXIT_FAILURE);
+				}
+				break;
+			// add more debug level
 			case 'd':
-				conf.debug++;
+				arg_debug = 1;
 				break;
 			case '?':
-			case ':':
 			default:
+				print_help();
 				exit(EXIT_FAILURE);
 				break;
 		}
@@ -974,6 +1049,14 @@ DOTCONF_CB(toggle_option) {
 		conf.allow_nonsyn = cmd->data.value;
 		return NULL;
 	}
+	if (strcasecmp(cmd->name, "queueno") == 0) {
+		if (cmd->data.value < 0) {
+			fprintf(stderr, "Error parsing config: queueno cannot be a negative value\n");
+			exit(EXIT_FAILURE);
+		}
+		conf.queueno = cmd->data.value;
+		return NULL;
+	}	
 	if (strcasecmp(cmd->name, "quiet") == 0) {
 		conf.quiet = cmd->data.value;
 		return NULL;
@@ -1073,11 +1156,6 @@ DOTCONF_CB(common_option) {
 #ifdef HAVE_FIREDNS
 	size_t blacklistlen = 0;
 #endif
-
-	if (strcasecmp(cmd->name, "queueno") == 0) {
-		conf.queueno = cmd->data.value;
-		return NULL;
-	}
 
 	ce =  malloc(sizeof(struct config_entry));
 	if (ce == NULL) {
