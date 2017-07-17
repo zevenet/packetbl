@@ -83,10 +83,10 @@
 #define DEBUG(x, y) if (conf.debug >= x) { printf(y "\n"); }
 struct packet_info {
 
-	unsigned short int b1;
-	unsigned short int b2;
-	unsigned short int b3;
-	unsigned short int b4;
+	uint8_t b1;
+	uint8_t b2;
+	uint8_t b3;
+	uint8_t b4;
 
 	int s_port;
 	int d_port;
@@ -1636,7 +1636,7 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 
 	struct config_entry *wltmp = NULL;
-	unsigned int ip_proc;
+	uint32_t ip_proc;
 
 	if (ip == NULL || list == NULL) {
 		return 0;
