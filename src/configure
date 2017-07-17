@@ -4182,7 +4182,7 @@ done
 
 
 
-for ac_header in libipq.h stdlib.h stdio.h string.h netinet/in.h netinet/tcp.h resolv.h netdb.h ctype.h syslog.h sys/stat.h sys/types.h unistd.h getopt.h dotconf.h libpool.h time.h ldns/ldns.h
+for ac_header in libipq.h stdlib.h stdio.h string.h netinet/in.h netinet/tcp.h resolv.h netdb.h ctype.h syslog.h sys/stat.h sys/types.h unistd.h getopt.h dotconf.h libpool.h time.h ldns/ldns.h pthread 
 do
 as_ac_Header=`$as_echo "ac_cv_header_$ac_header" | $as_tr_sh`
 if { as_var=$as_ac_Header; eval "test \"\${$as_var+set}\" = set"; }; then
@@ -4517,6 +4517,10 @@ if [ ! -d "/usr/include/ldns" ]; then
 else
 	LIBS="$LIBS -lldns"
 fi
+
+# checking pthread lib
+$as_echo "Checking lib pthread"
+LIBS="$LIBS -lpthread "
 
 # checking nfqueue
 { $as_echo "$as_me:$LINENO: checking for nfq_set_verdict in -lnetfilter_queue" >&5
@@ -5391,7 +5395,8 @@ $debug ||
 if test -n "$CONFIG_FILES"; then
 
 
-ac_cr=''
+ac_cr='
+'
 ac_cs_awk_cr=`$AWK 'BEGIN { print "a\rb" }' </dev/null 2>/dev/null`
 if test "$ac_cs_awk_cr" = "a${ac_cr}b"; then
   ac_cs_awk_cr='\\r'
