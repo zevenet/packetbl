@@ -1,5 +1,6 @@
 
 /* Copyright 2004 Russell Miller
+	Copyright 2017 Alvaro Cano <alvaro.cano@zevenet.com>
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
@@ -1061,7 +1062,7 @@ void print_help ( void )
 {
 	printf ("Usage: packetbl [OPTION]...\n\
 	-h\t\t- Show this help	\n\
-	-f <FILE>\t- Chose a config file\n\
+	-f <FILE>\t- Choose a config file\n\
 	-q\t\t- Run the binary in quiet mode, packetbl does not log the veredict\n\
 	-p <FILE>\t- Set a PID file \n\
 	-V\t\t- Show packetbl version	\n\
@@ -1110,7 +1111,7 @@ void parse_arguments(int argc, char **argv) {
 				break;
 			// print packetbl version
 			case 'V':
-				printf("PacketBL version %s\n", PACKAGE_VERSION);
+				printf("%s\n", PACKAGE_VERSION);
 				exit(EXIT_SUCCESS);
 				break;
 			// use a specific config file

@@ -1,3 +1,10 @@
+17/7/17
+- Direct DNS queries to the nameserver
+- Multithread
+- Select configuration file and pid file
+- Netfilter queue options: Fail-over, queue size and queue number
+- Makefile generate a Debian package
+
 7/25/04
 - Changed over to autoconf 
 (thanks to Roy Keene (packetbl at rkeene dot org) for his assistance,
