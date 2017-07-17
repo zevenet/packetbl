@@ -16,6 +16,7 @@
 */
 
 #include "packetbl.h"
+#include "directresolv.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -37,6 +38,7 @@
 
 #include <dotconf.h>
 #include <libpool.h>
+#include <regex.h>
 
 #ifdef USE_SOCKSTAT
 #include <sys/socket.h>
@@ -75,6 +77,8 @@
 # define PBL_ID_T u_int32_t
 # define PBL_ERRSTR ""
 
+# define CONFBUF 256
+
 #define DEBUG(x, y) if (conf.debug >= x) { printf(y "\n"); }
 struct packet_info {
 
@@ -111,6 +115,10 @@ struct config_entry *whitelistbl = NULL;
 struct config_entry *blacklist = NULL;
 struct config_entry *whitelist = NULL;
 
+// to query to a alternative nameserver
+static char alt_nameserver_file [CONFBUF];
+static char alt_domain [CONFBUF];
+
 struct bl_context {
 
 	int	permissions;
@@ -142,9 +150,15 @@ struct config {
 	int 	log_facility;
 	int	queueno;
 	int	quiet;
+	char*	alt_resolv_file;
+	char*	alt_domain;
 	int	debug;
 };
 static struct config conf = { 0, 0, 1, 0, LOG_DAEMON, 0 };
+
+static ldns_resolver *res = NULL;
+// struct to save regexp of domain
+static regex_t regex;
 
 struct pbl_stat_info {
 	uint32_t	cacheaccept;
@@ -199,6 +213,8 @@ static const configoption_t options[] = {
 	{"allownonsyn", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
 	{"dryrun", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
 	{"quiet", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
+	{"alternativedomain", ARG_STR, toggle_option, NULL, O_ROOT},
+	{"alternativeresolvefile", ARG_STR, toggle_option, NULL, O_ROOT},
 #ifdef USE_CACHE
 	{"cachettl", ARG_INT, toggle_option, NULL, O_ROOT},
 	{"cachesize", ARG_INT, toggle_option, NULL, O_ROOT},
@@ -230,7 +246,7 @@ FUNC_ERRORHANDLER(error_handler) {
 void daemonize(void) {
 
 	pid_t pid;
-
+	
 	chdir("/");
 
 	close(STDIN_FILENO);
@@ -676,7 +692,32 @@ int main(int argc, char **argv) {
 	packet_cache_clear();
 #endif
 
-
+	// Creating alternative nameservers to do request directly to zevenet domain
+	
+		//~ syslog(LOG_ERR, "Domain: %s",conf.alt_domain);
+		//~ syslog(LOG_ERR, "nameserver file: %s",conf.alt_resolv_file);
+	if ((configure_direct_nameserver( &res, conf.alt_resolv_file )) == -1) {
+		syslog(LOG_ERR, "Load nameservers failed");
+		DEBUG(1, "configure_direct_nameserver error");
+		exit(EXIT_FAILURE);
+	}
+	if (res==NULL)
+	{
+		DEBUG(2, "Optional nameservers has not been saved");
+		exit(EXIT_FAILURE);
+	}
+	
+	if (conf.log_facility)
+	{
+		// creating regexp to compare request domain with a specific domain
+		if ( regcomp(&regex, conf.alt_domain, 0) != 0 )
+		{
+			syslog(LOG_ERR, "Create regexp failed");
+			exit(EXIT_FAILURE);
+		}
+	}
+	
+	// initializing nfqueue
 	DEBUG(2, "Creating nfq handle...");
 	if ((h = nfq_open()) == NULL) {
 		syslog(LOG_ERR, "Couldn't create nfq handle: %s", strerror(errno));
@@ -703,8 +744,7 @@ int main(int argc, char **argv) {
 	}
 
 	if ((PBL_SET_MODE(handle, PBL_COPY_PACKET, BUFFERSIZE)) == -1) {
-		syslog(LOG_ERR, "ipq_set_mode error: %s",
-			PBL_ERRSTR);
+		syslog(LOG_ERR, "ipq_set_mode error: %s", PBL_ERRSTR);
 		DEBUG(1, "ipq_set_mode error");
 		if (errno == 111) {
 			syslog(LOG_ERR, "try loading the ip_queue module");
@@ -932,6 +972,24 @@ DOTCONF_CB(toggle_option) {
 	}
 	if (strcasecmp(cmd->name, "quiet") == 0) {
 		conf.quiet = cmd->data.value;
+		return NULL;
+	}	
+	if (strcasecmp(cmd->name, "alternativedomain") == 0) {
+		size_t sizechain = 0;
+		conf.alt_domain = (char *)strdup(cmd->data.str);
+		sizechain = strlen(conf.alt_domain);
+		if (conf.alt_domain[sizechain-1] == '.') {
+		conf.alt_domain[sizechain-1]='\0';
+		}
+		return NULL;
+	}
+	if (strcasecmp(cmd->name, "alternativeresolvefile") == 0) {
+		size_t sizechain = 0;
+		conf.alt_resolv_file = (char *)strdup(cmd->data.str);
+		sizechain = strlen(conf.alt_resolv_file);
+		if (conf.alt_resolv_file[sizechain-1] == '.') {
+		conf.alt_resolv_file[sizechain-1]='\0';
+		}
 		return NULL;
 	}
 #ifdef USE_CACHE
@@ -1266,6 +1324,7 @@ int validate_blacklist(char *str) {
 }
 */
 
+
 /*
  * SYNOPSIS:
  *   int check_packet_dnsbl(
@@ -1292,6 +1351,7 @@ int validate_blacklist(char *str) {
 int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) {
 
 	struct config_entry *wltmp = NULL;
+	char dns_ip[20];
 #ifndef HAVE_FIREDNS
 	struct hostent *host;
 #else
@@ -1302,36 +1362,53 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 		return 0;
 	}
 
+	//~ ldns_resolver *resAux = res;
 	wltmp = list;
-
+	
 	while (1) {
 
 		char lookupbuf[BUFFERSIZE];
 	
 		snprintf(lookupbuf, sizeof(lookupbuf), "%hhu.%hhu.%hhu.%hhu.%s", ip->b4, ip->b3, ip->b2, ip->b1,
 			wltmp->string);
+		
+		// syslog(LOG_ERR, "Checking server %s", wltmp->string );    // print in log the current domain
 
-#ifndef HAVE_FIREDNS
-		host = gethostbyname(lookupbuf);
-#else
-		host = firedns_resolveip4(lookupbuf);
-#endif
-
-		if (host == NULL) {
-#ifndef HAVE_FIREDNS
-			if (h_errno != HOST_NOT_FOUND) {
-				syslog(LOG_ERR, "Error looking up host %s",
-					lookupbuf	
-				);
+		// If domain contains zevenet domain, send it directly to zevenet nameserver
+		if(regexec(&regex, wltmp->string, (size_t) 0, NULL, 0) != REG_NOMATCH )
+		{
+			DEBUG(1, "Sending to optional DNS");
+			if ( direct_dns_resolv ( res, lookupbuf ) )
+			{
+				// found
+				return 1;
 			}
-#else
-		;
-#endif
-		} else {
-			// found.
-			return 1;
 		}
-			
+		else
+		{
+			DEBUG(1, "Sending to default DNS");
+#ifndef HAVE_FIREDNS
+			host = gethostbyname(lookupbuf);
+#else
+			host = firedns_resolveip4(lookupbuf);
+#endif
+		
+			if (host == NULL) {
+#ifndef HAVE_FIREDNS
+				if (h_errno != HOST_NOT_FOUND) {
+					syslog(LOG_ERR, "Error looking up host %s",
+						lookupbuf	
+					);
+				}
+#else
+			;
+#endif
+			} else {
+				// found.
+				return 1;
+			}
+		}
+		
 		if (wltmp->next == NULL) {
 			/* Termination case */
 			return 0;
