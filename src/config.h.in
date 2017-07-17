@@ -30,6 +30,9 @@
 /* Define to 1 if you have the <linux/netfilter.h> header file. */
 #undef HAVE_LINUX_NETFILTER_H
 
+/* Define version the netfilter_queue version */
+#undef NETFILTERQUEUE_VERSION_NUMBER 
+
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
 

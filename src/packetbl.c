@@ -246,7 +246,7 @@ FUNC_ERRORHANDLER(error_handler) {
 void daemonize(void) {
 
 	pid_t pid;
-	
+
 	chdir("/");
 
 	close(STDIN_FILENO);
@@ -554,7 +554,11 @@ static int pbl_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	int ret;
 	int id;
 	struct nfqnl_msg_packet_hdr *ph;
+#if NETFILTERQUEUE_VERSION_NUMBER == 0
 	char *nfdata;
+#else
+	unsigned char *nfdata;
+#endif
 	struct packet_info ip;
 
 	DEBUG(2, "Entering callback");
