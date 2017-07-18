@@ -1,22 +1,32 @@
 # [PacketBL](https://www.zevenet.com)
-This Packetbl software is a new NON-OFFICIAL version of a not maintenance project with this same name, this project was developed by Russell Miller. 
-The goal of this program is to create a RBL userspace solution working with netfilter.
-To pass a packet from netfilter to userspace it is used netfilter-queue feature where Packetbl has to link.
+This Packetbl software is a new NON-OFFICIAL version of a not maintained project with this same name, this project was developed by Russell Miller. Later, it was incluided in CentOS repositories and now, it has been improved by Alvaro cano of Zevenet team.
+The goal of this program is to connect netfilter with user space to check if a origin IP is malicious using a DNS server as a realtime database.
+Packetbl uses netfilter-queue feature to receive a packet from netfilter to user space.
 
-Packetbl will reject or will drop a connection if a DNS server resolves the queried IP. So the DNS server will be used as a dynamic black list. Those black lists are supported by 
+Packetbl will reject or will drop a connection if a DNS server resolves the queried client IP. So the DNS server will be used as a service of dynamic black lists. Those black lists are supported by 
 specialist security providers, you can find some of them here: https://en.wikipedia.org/wiki/Comparison_of_DNS_blacklists
 
+Some RBL domains are:
+
+- zen.spamhaus.org
+- dnsbl.njabl.org
+- all.rbl.webiron.net
+- bl.spamcop.net
+- dyna.spamrats.com
+- all.bl.blocklist.de 
+
+
 # RBL
-RBL or DNSBL is a tech that does a DNS query about a IP source to determinate if the IP is blacklisted. Then all packets from a malicious IP can be dropped, rejected or logged to mitigate a cyber-attack.
+RBL or DNSBL is a tech that does DNS queries about a source IP to determinate if the IP is blacklisted. If the source IP is resolved by a remote DNS serve, the malicious packet can be dropped, rejected or logged to mitigate a cyber-attack.
 RBL technology is typically used to mitigate email threats as spam or phishing. But it is useful for another services as FTP, SIP, SSH, web...
 
 
 # New features
-- Multi-thread, Packetbl will create a thread for each checking packet
-- Direct DNS queries, Packetbl can use a determinate DNS server to resolve a specific domain
-- Fail-over, This option is available since Linux 3.6 and allow to accept packet instead of dropping them when the queue is full.
-- Queuesize, this parameter allow to set Netfilter queue size
-- Select config file, it is possible choose a packetbl config file while "-f" command line option
+- Multi-thread, Packetbl will create a thread for each checking packet.
+- Direct DNS queries, Packetbl can use a determinate DNS server to resolve a specific domain.
+- Fail-over, This option is available since Linux 3.6 and allows to accept packet instead of dropping them when the netfilter queue is full.
+- Queuesize, this parameter allows to set Netfilter queue size.
+- Select a config file, it is possible to choose a packetbl config file with the "-f" command line option.
 
 
 ## Installation and runtime
@@ -96,7 +106,7 @@ PacketBL uses a GNU autoconf style `configure' script for
 		the PacketBL daemon and the "packetbl_getstat" process.
 		Default is /tmp/.packetbl.sock.
 			
-To install Packetbl, execute the follow commands:
+To install Packetbl, execute the following commands:
 
 ```
 git clone https://github.com/zevenet/packetbl.git
@@ -222,10 +232,10 @@ sudo dpkg -i ../packetbl.deb
 		o. Queueno        0
 			Specify a netfilter queue to packetbl
 		p. Queuesize    2048
-			Number of packet waiting in the netfilter queue
+			Number of packets that can be stored in the netfilter queue.
 		q. Threadmax    700
-			Maximum number of threads. One thread for each processing 
-			packet. Comment this parameter not to limit the thread number.
+			Maximum number of threads. One thread is required to manage a 
+			packet. If this parameter is commented then there is not limit in the threads number.
 
 
 ### COMMAND LINE ARGUMENTS
@@ -247,10 +257,10 @@ sudo dpkg -i ../packetbl.deb
 		d. "-f <file>"	
 			Run packetbl using the file as configuration file.
 		e. "-p <file>"
-			Set a PID where the pid it is saved.
+			Set a file where the PID is saved.
 		f. "-d <level>"
-			Run packetbl in debug mode. Level is a number and it shows more 
-			information when it is greater.
+			Run packetbl in debug mode. Level is a number between 0 and 3, 
+			been 3 the level with most information details.
 			
 	   Command line arguments always override their configuration file
 	   counter-parts where appropriate.  Unknown command line arguments
@@ -258,44 +268,50 @@ sudo dpkg -i ../packetbl.deb
 
 ### Runtime
 Once packetbl has been installed, run packetbl with a config file:
+```
 /usr/local/bin/packetbl -f /usr/local/etc/packetbl/packetbl_configfile.conf
-
-Then it is necessary send the input packets to packetbl. It will be done while a IPtables rule, an example could be:
 ```
-iptables -A INPUT -t filter -p tcp --dport 53 -j NFQUEUE --queue-num 0
-```
-With this rule, all email traffic will be analyzed and the spam emails will be discarded.
 
-It is important that the "queue-num" of the IPtables rule will be same than packetbl config file "queueno"
+It is necessary to fordward the origin packet to packetbl in order to query a DNS server. 
+It must be done with an IPtables rule, an example could be:
+```
+iptables -A INPUT -t filter -p tcp --dport 25 -j NFQUEUE --queue-num 0
+```
+With this rule, all SMPT input traffic will be fordwarded to netfilter queue 0 
+where packetbl receives the packets and query to the DNS servers. If the origin IP is resolved
+by some of the DNS servers, Packetbl will apply an action to the packet (for example: drop, log or reject).
+
+The "queue-num" parameter of IPtables must be the same than the "queueno" directive of Packetbl config file.
 
 
 ## Benchmark
 For the test, a Nginx server has been stressed using the tool "wrk".
-The graph shows the number of HTTP resquest that Ngins has responsed. Each line shows the requests when it is not used Packetbl, and when Packetbl is used to 
-ckeck the IP source in different numbers of domains. For each domain, packetbl will do a DNS query
-This test has been done without cache to simule that each HTTP request is from a new client.
+The following graph shows the number of HTTP resquest that Nginx has responsed with and without Packetbl. 
+This test has been done without configuring the Packetbl cache to simule that each HTTP request is from a 
+new client and to stress to Packetbl.
 
-In this benchmark packetbl was compiled without firedns 
+In this benchmark packetbl was compiled without firedns. 
 Packetbl was running in a Debian Stretch.
 
 ![Benchmark](benchmark.png)
-legend: 
-- blue, without Packetbl
-- red, checking the IP in 5 domains
-- yellow, checking the IP in 10 domains
-- green, checking the IP in 15 domains
+
+- The vertical axis shows the number of success HTTP requests per second.
+- The horizontal axis shows the number of concurrent clients doing HTTP requests.
+- The domains number is the number of RBL domains where Packetbl is looking for the source IP (Packetbl does one DNS query for each domain).
+
 
 ### Conclusion
-Using Packetbl to check the IP in 5 domains, it has a average performance of 90%
-Using Packetbl to check the IP in 10 domains, it has a average performance of 77%
-Using Packetbl to check the IP in 15 domains, it has a average performance of 67%
+
+- Using Packetbl to check the origin IP in 4 domains, it has an average performance of 90%.
+- Using Packetbl to check the origin IP in 10 domains, it has an average performance of 77%.
+- Using Packetbl to check the origin IP in 15 domains, it has an average performance of 67%.
 
 
 ## How to Contribute
-All reported bugs, new feature and patches are welcome
+All reported bugs, new feature and patches are welcome.
 
 ### Reporting 
-Please use the [GitHub project Issues](https://github.com/packetbl/zlb/issues) to report any issue or bug with the software. Try to describe the problem and a way to reproduce it. It'll be useful to attach the service and network configurations as well as system and services logs.
+Please use the [GitHub project Issues](https://github.com/zevenet/packetbl/issues) to report any issue or bug with the software. Try to describe the problem and a way to reproduce it. It'll be useful to attach the service and network configurations as well as system and services logs.
 
 
 ## [www.zevenet.com](https://www.zevenet.com)
