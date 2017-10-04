@@ -594,7 +594,7 @@ SHELL=${CONFIG_SHELL-/bin/sh}
 # Identity of this package.
 PACKAGE_NAME='packetbl'
 PACKAGE_TARNAME='packetbl'
-PACKAGE_VERSION='0.8-beta1'
+PACKAGE_VERSION='0.8'
 PACKAGE_STRING="packetbl $PACKAGE_VERSION"
 PACKAGE_BUGREPORT=''
 

@@ -659,7 +659,7 @@ static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 		logmsg(0, LOG_ERR, "Error reading packet. Accepting packet.");
 		return 1;
 	}
-	
+
 	if (conf.threads_max)
 	{
 		pthread_mutex_lock(&lock_count);
@@ -792,6 +792,10 @@ int main(int argc, char **argv) {
 
 	/* Parse our configuration data. */
 	parse_config( );
+
+	if (conf.dryrun == 1 && conf.log_level<5) {
+		conf.log_level=5;
+	}
 
 	openlog("packetbl", LOG_PID, conf.log_facility);
 	
@@ -1205,8 +1209,8 @@ DOTCONF_CB(toggle_option) {
 		return NULL;
 	}	
 	if (strcasecmp(cmd->name, "threadmax") == 0) {
-		if (cmd->data.value <= 0) {
-			logmsg(-1, LOG_ERR, "Error parsing config: threadmax cannot be a negative or null value\n");
+		if (cmd->data.value < 0) {
+			logmsg(-1, LOG_ERR, "Error parsing config: threadmax cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		conf.threads_max = cmd->data.value;

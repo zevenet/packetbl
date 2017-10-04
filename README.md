@@ -54,13 +54,13 @@ Packetbl has been tested in stable debian distributions: Wheezy, Jessie and Stre
 		a configured nameserver is unreachable or down.
 
 
-### Dependences
-- Compiling dependences:
+### Dependencies
+- Compiling dependencies:
 ```
 libldns-dev libdotconf-dev libnetfilter-queue-dev libnfnetlink-dev
 ```
 
-- Executing dependences
+- Executing dependencies
 > wheezy:
 ```
 libdotconf1.0 libldns1 libnetfilter-queue1 libnfnetlink0
