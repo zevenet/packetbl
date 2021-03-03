@@ -28,8 +28,7 @@ int dns_query ( ldns_resolver *res, char * domain_str )
 {
     ldns_rdf *domain = NULL;
 	int resolved = 0;
-	int  i, j;
-	
+
 	/* create a rdf from the command line arg */
 	domain = ldns_dname_new_frm_str( domain_str );
 	if (!domain) {

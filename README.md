@@ -1,9 +1,9 @@
 # [PacketBL](https://www.zevenet.com)
-This Packetbl software is a new NON-OFFICIAL version of a not maintained project with this same name, this project was developed by Russell Miller. Later, it was incluided in CentOS repositories and now, it has been improved by Alvaro cano of Zevenet team.
+This Packetbl software is a new NON-OFFICIAL version of a not maintained project with this same name, this project was developed by Russell Miller. Later, it was incluided in CentOS repositories and now, it has been improved by Alvaro cano of ZEVENET team.
 The goal of this program is to connect netfilter with user space to check if a origin IP is malicious using a DNS server as a realtime database.
 Packetbl uses netfilter-queue feature to receive a packet from netfilter to user space.
 
-Packetbl will reject or will drop a connection if a DNS server resolves the queried client IP. So the DNS server will be used as a service of dynamic black lists. Those black lists are supported by 
+Packetbl will reject or will drop a connection if a DNS server resolves the queried client IP. So the DNS server will be used as a service of dynamic black lists. Those black lists are supported by
 specialist security providers, you can find some of them here: https://en.wikipedia.org/wiki/Comparison_of_DNS_blacklists
 
 Some RBL domains are:
@@ -13,7 +13,7 @@ Some RBL domains are:
 - all.rbl.webiron.net
 - bl.spamcop.net
 - dyna.spamrats.com
-- all.bl.blocklist.de 
+- all.bl.blocklist.de
 
 
 # RBL
@@ -35,7 +35,7 @@ Packetbl has been tested in stable debian distributions: Wheezy, Jessie and Stre
 ### Prerequisites
 	1. Dot.conf (required)
 		Dot.conf is used to handle the configuration data and is
-		required for PacketBL to operate. 
+		required for PacketBL to operate.
 		Dot.conf uses "Apache-style" configuration files so logical
 		hierarchal configuration files can be used.
 
@@ -85,7 +85,7 @@ PacketBL uses a GNU autoconf style `configure' script for
    There are a few options that can be passed to the `configure' script
    that will affect the way PacketBL is built (in addition to the
    standard autoconf `configure' script options):
-   
+
 	a. --with-cache
 		This option will enable the experimental caching
 		mechanism.  This may introduce unexpected problems.
@@ -105,7 +105,7 @@ PacketBL uses a GNU autoconf style `configure' script for
 		domain socket that is used for communications between
 		the PacketBL daemon and the "packetbl_getstat" process.
 		Default is /tmp/.packetbl.sock.
-			
+
 To install Packetbl, execute the following commands:
 
 ```
@@ -127,7 +127,7 @@ sudo dpkg -i ../packetbl.deb
 			blacklistbl    zen.spamhaus.org
 			blacklistbl    my.own.dnsbl    # this domain is a example
 			whitelistbl    whitelist.domain.com    # this domain is a example
-			
+
 			# whitelist/blacklist cidr
 			blacklist    4.87.4.4  # this IP is a example
 			whitelist    192.168.0.0/16
@@ -219,22 +219,27 @@ sudo dpkg -i ../packetbl.deb
 			a packet.  The safe choice (and default) is "no"
 			meaning that PacketBL writes a message to syslog about
 			every packet.
-		l. loglevel 5
-			Log lvl, syslog log levels from 0 to 7: 0 Emergency, 1 Alert, 2 
-			Critical, 3 Error, 4 Warning, 5 Notice, 6 Informational, or 7 Debug
-		m. AlternativaDomain my.own.domain
-			This parameter is related with next one. Queries to this domain 
+		l. QuietBL no. It overwrites the "Quiet" option for reject resolutions
+		m. QuietWL no. It overwrites the "Quiet" option for accept resolutions
+		n. loglevel 5
+			Log lvl, syslog log levels from 0 to 7: 0 Emergency, 1 Alert, 2
+                        Critical, 3 Error, 4 Warning, 5 Notice, 6 Informational, or 7 Debug.
+                        Lvl 4 no resolution will be logged.
+                        Lvl 5 IPs that match in dnsbl or blacklist/whitelist will be logged.
+                        Lvl 6 All resolution will be logged. (It adds cache matches and default actions)
+		o. AlternativaDomain my.own.domain
+			This parameter is related with next one. Queries to this domain
 			will be done using the resovlers of the file "AlternativeresolveFiles"
-		n. AlternativeresolveFiles /usr/local/etc/packetbl/optional_resolvers
-			This file is like /etc/resolv.conf. It will be used to get a lookup for 
-			the domain "AlternativaDomain". In this file must be appear the 
+		p. AlternativeresolveFiles /usr/local/etc/packetbl/optional_resolvers
+			This file is like /etc/resolv.conf. It will be used to get a lookup for
+			the domain "AlternativaDomain". In this file must be appear the
 			IP of the DNS server that resolves the domain.
-		o. Queueno        0
+		q. Queueno        0
 			Specify a netfilter queue to packetbl
-		p. Queuesize    2048
+		r. Queuesize    2048
 			Number of packets that can be stored in the netfilter queue.
-		q. Threadmax    700
-			Maximum number of threads. One thread is required to manage a 
+		s. Threadmax    700
+			Maximum number of threads. One thread is required to manage a
 			packet. If this parameter is commented then there is not limit in the threads number.
 
 
@@ -254,14 +259,14 @@ sudo dpkg -i ../packetbl.deb
 			standard output and exit successfully.
 		c. "-h"
 			Show the command line options.
-		d. "-f <file>"	
+		d. "-f <file>"
 			Run packetbl using the file as configuration file.
 		e. "-p <file>"
 			Set a file where the PID is saved.
 		f. "-d <level>"
-			Run packetbl in debug mode. Level is a number between 0 and 3, 
+			Run packetbl in debug mode. Level is a number between 0 and 3,
 			been 3 the level with most information details.
-			
+
 	   Command line arguments always override their configuration file
 	   counter-parts where appropriate.  Unknown command line arguments
 	   cause PacketBL to terminate in error immediately at startup.
@@ -272,12 +277,12 @@ Once packetbl has been installed, run packetbl with a config file:
 /usr/local/bin/packetbl -f /usr/local/etc/packetbl/packetbl_configfile.conf
 ```
 
-It is necessary to fordward the origin packet to packetbl in order to query a DNS server. 
+It is necessary to fordward the origin packet to packetbl in order to query a DNS server.
 It must be done with an IPtables rule, an example could be:
 ```
 iptables -A INPUT -t filter -p tcp --dport 25 -j NFQUEUE --queue-num 0
 ```
-With this rule, all SMPT input traffic will be fordwarded to netfilter queue 0 
+With this rule, all SMPT input traffic will be fordwarded to netfilter queue 0
 where packetbl receives the packets and query to the DNS servers. If the origin IP is resolved
 by some of the DNS servers, Packetbl will apply an action to the packet (for example: drop, log or reject).
 
@@ -286,11 +291,11 @@ The "queue-num" parameter of IPtables must be the same than the "queueno" direct
 
 ## Benchmark
 For the test, a Nginx server has been stressed using the tool "wrk".
-The following graph shows the number of HTTP resquest that Nginx has responsed with and without Packetbl. 
-This test has been done without configuring the Packetbl cache to simule that each HTTP request is from a 
+The following graph shows the number of HTTP resquest that Nginx has responsed with and without Packetbl.
+This test has been done without configuring the Packetbl cache to simule that each HTTP request is from a
 new client and to stress to Packetbl.
 
-In this benchmark packetbl was compiled without firedns. 
+In this benchmark packetbl was compiled without firedns.
 Packetbl was running in a Debian Stretch.
 
 ![Benchmark](benchmark.png)
@@ -310,7 +315,7 @@ Packetbl was running in a Debian Stretch.
 ## How to Contribute
 All reported bugs, new feature and patches are welcome.
 
-### Reporting 
+### Reporting
 Please use the [GitHub project Issues](https://github.com/zevenet/packetbl/issues) to report any issue or bug with the software. Try to describe the problem and a way to reproduce it. It'll be useful to attach the service and network configurations as well as system and services logs.
 
 

@@ -17,7 +17,6 @@
 */
 
 
-#include "packetbl.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -38,18 +37,13 @@
 #include <linux/netfilter.h>
 
 #include <dotconf.h>
-#include <libpool.h>
 #include <regex.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <stdarg.h>
 
+#include "packetbl.h"
 #include "directresolv.h"
-
-#ifdef USE_SOCKSTAT
-#include <sys/socket.h>
-#include <sys/un.h>
-#endif
 
 #ifdef HAVE_FIREDNS
 #include <firedns.h>
@@ -74,7 +68,7 @@
 #  define TH_ACK        0x10
 #  define TH_URG        0x20
 
-# include <libnetfilter_queue.h>
+# include <libnetfilter_queue/libnetfilter_queue.h>
 # define SET_VERDICT nfq_set_verdict
 # define PBL_HANDLE nfq_q_handle
 # define PBL_SET_MODE nfq_set_mode
@@ -88,13 +82,18 @@
 #define LOGGING(x, de, string) if (conf.debug >= x) { printf(y "\n"); }
 struct packet_info {
 
-	//~ unsigned short int b1;
-	uint8_t b1;
-	uint8_t b2;
-	uint8_t b3;
-	uint8_t b4;
+    // Source info
+    uint8_t s_ip_b1;
+    uint8_t s_ip_b2;
+    uint8_t s_ip_b3;
+    uint8_t s_ip_b4;
+    int s_port;
 
-	int s_port;
+    // Destination info
+    uint8_t d_ip_b1;
+    uint8_t d_ip_b2;
+    uint8_t d_ip_b3;
+    uint8_t d_ip_b4;
 	int d_port;
 
 	int flags;
@@ -119,7 +118,7 @@ struct config_entry {
 
 
 // parameters to create a thread
-struct thr_arg 
+struct thr_arg
 {
 	struct nfq_q_handle *queue_handle; 	 // nf_queue id
 	struct packet_info ip;
@@ -127,7 +126,7 @@ struct thr_arg
 };
 
 
-struct thr_parameters 
+struct thr_parameters
 {
 	pthread_attr_t	*thr_attr;		// argument
 	pthread_t			*thr;				// parameters
@@ -153,7 +152,6 @@ struct bl_context {
 	int	permissions;
 	const char *current_end_token;
 
-	pool_t *pool;
 };
 
 static pthread_mutex_t lock_queue;
@@ -183,24 +181,45 @@ static DOTCONF_CB(toggle_option);
 static DOTCONF_CB(facility_option);
 
 static const char *end_host = "</host>";
-char msgbuf[BUFFERSIZE];
+char rulemsgbuf[MAXBUF];
+char ipmsgbuf[MAXBUF];
 
 struct config {
+	char* name;
 	int	allow_non25;
 	int	allow_nonsyn;
 	int	default_accept;
 	int	dryrun;
-	int 	log_facility;
-	int 	log_level;
+    int log_facility;
+    int log_level;
 	int	queueno;
 	int	quiet;
-	char*	alt_resolv_file;
-	char*	alt_domain;
+    int	quiet_wl;
+    int	quiet_bl;
+    char* alt_resolv_file;
+    char* alt_domain;
 	int	debug;
 	int	queue_size;
 	int	threads_max;
 };
-static struct config conf = { 0, 0, 1, 0, LOG_DAEMON, 5, 0, 1, NULL, NULL, 0, 0, 0};
+static struct config conf = {
+    NULL,
+    0,
+    0,
+    1,
+    0,
+    LOG_DAEMON,
+    5,
+    0,
+    0,
+    0,
+    0,
+    NULL,
+    NULL,
+    0,
+    0,
+    0
+};
 
 
 // struct to save regexp of domain
@@ -253,9 +272,10 @@ static void pbl_set_verdict(struct PBL_HANDLE *h, PBL_ID_T id,
 static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
         struct nfq_data *nfa, void *thread_hd);
 void pbl_callback(void *data);
-		
-	
+
+
 static const configoption_t options[] = {
+	{"name", ARG_STR, common_option, NULL, O_ROOT},
 	{"<host>", ARG_NONE, host_section_open, NULL, O_ROOT},
 	{"</host>", ARG_NONE, common_section_close, NULL, O_ROOT},
 	{"blacklistbl", ARG_STR, common_option, NULL, O_HOSTSECTION},
@@ -267,6 +287,8 @@ static const configoption_t options[] = {
 	{"allownonsyn", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
 	{"dryrun", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
 	{"quiet", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
+    {"quietwl", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
+    {"quietbl", ARG_TOGGLE, toggle_option, NULL, O_ROOT},
 	{"alternativedomain", ARG_STR, toggle_option, NULL, O_ROOT},
 	{"alternativeresolvefile", ARG_STR, toggle_option, NULL, O_ROOT},
 #ifdef USE_CACHE
@@ -299,8 +321,7 @@ logmsg(const int debug, const int priority, const char *fmt, ...)
 {
 	char    buf[MAXBUF + 1];
 	va_list ap;
-	struct tm   *t_now, t_res;
-	
+
 	buf[MAXBUF] = '\0';
 	va_start(ap, fmt);
 	vsnprintf(buf, MAXBUF, fmt, ap);
@@ -310,10 +331,10 @@ logmsg(const int debug, const int priority, const char *fmt, ...)
 		if(conf.debug > debug)
 			printf("%s\n", buf);
 	}
-	
+
 	if (conf.log_level >= priority)
 		syslog(priority, "%s", buf);
-		
+
 }
 
 
@@ -331,7 +352,7 @@ void daemonize(void) {
 
 	pid_t pid;
 	FILE *pidf;
-	
+
 	chdir("/");
 
 	close(STDIN_FILENO);
@@ -343,14 +364,16 @@ void daemonize(void) {
 	pid = fork();
 
 	if (pid > 0) {
-		pidf = fopen ( packetbl_pidfile , "w");
-		if (!pidf) {
-			logmsg(0, LOG_ERR, "Can't write PID %d to %s", (int)pid, packetbl_pidfile);
-		} else {
-			fprintf(pidf, "%d\n", (int)pid);
-			fclose(pidf);
-		}
-		exit(EXIT_SUCCESS);
+        if (packetbl_pidfile != NULL) {
+            pidf = fopen ( packetbl_pidfile , "w");
+            if (!pidf) {
+                logmsg(0, LOG_ERR, "Can't write PID %d to %s", (int)pid, packetbl_pidfile);
+            } else {
+                fprintf(pidf, "%d\n", (int)pid);
+                fclose(pidf);
+            }
+            exit(EXIT_SUCCESS);
+        }
 	}
 	if (pid < 0) {
 		logmsg(0, LOG_ERR, "Fork failed while daemonizing: %s", strerror(errno));
@@ -387,10 +410,10 @@ void daemonize(void) {
 static uint32_t packet_cache_hash(const struct packet_info ip) {
 	uint32_t hash = 0;
 
-	hash = ip.b1 << 6;
-	hash += ip.b2 << 4;
-	hash += ip.b3 << 2;
-	hash += ip.b4;
+    hash = ip.s_ip_b1 << 6;
+    hash += ip.s_ip_b2 << 4;
+    hash += ip.s_ip_b3 << 2;
+    hash += ip.s_ip_b4;
 	return hash;
 }
 
@@ -446,10 +469,10 @@ void packet_cache_clear(void) {
  *
  */
 static uint32_t packet_info_to_ip(const struct packet_info ip) {
-	return ((ip.b1 & 0xff) << 24) | 
-		((ip.b2 & 0xff) << 16) | 
-		((ip.b3 & 0xff) << 8) | 
-		(ip.b4 & 0xff);
+    return ((ip.s_ip_b1 & 0xff) << 24) |
+        ((ip.s_ip_b2 & 0xff) << 16) |
+        ((ip.s_ip_b3 & 0xff) << 8) |
+        (ip.s_ip_b4 & 0xff);
 }
 
 /*
@@ -474,9 +497,9 @@ static uint32_t packet_info_to_ip(const struct packet_info ip) {
  *
  */
 int packet_check_ip(const struct packet_info ip) {
-	
+
 	int retval = NF_ACCEPT;
-	struct pbl_stat_info *statics_pointer = &statistics; 
+	struct pbl_stat_info *statics_pointer = &statistics;
 #ifdef USE_CACHE
 	uint32_t ipaddr_check;
 	uint32_t cache_hash = 0;
@@ -491,7 +514,7 @@ int packet_check_ip(const struct packet_info ip) {
 	}
 
 	if (cache_hash>0 && cache_hash<packet_cache_len && packet_cache != NULL) {
-		if (packet_cache[cache_hash].ipaddr==ipaddr_check 
+		if (packet_cache[cache_hash].ipaddr==ipaddr_check
 				&& packet_cache[cache_hash].expires>currtime) {
 			get_ip_string(&ip);
 			retval = packet_cache[cache_hash].action;
@@ -499,17 +522,19 @@ int packet_check_ip(const struct packet_info ip) {
 				case NF_DROP:
 					actionstr="reject";
 					statics_pointer->cachereject++;
+                    if (!conf.quiet_bl)
+                        logmsg(0, LOG_INFO, "%s [Found in cache (%s)] [%s]", conf.name, actionstr, ipmsgbuf);
 					break;
 				case NF_ACCEPT:
 					actionstr="accept";
 					statics_pointer->cacheaccept++;
+                    if (!conf.quiet_wl)
+                        logmsg(0, LOG_INFO, "%s [Found in cache (%s)] [%s]", conf.name, actionstr, ipmsgbuf);
 					break;
 				default:
 					actionstr="???";
 					break;
-			}
-			if (!conf.quiet)
-				logmsg(0, LOG_INFO, "[Found in cache (%s)] [%s]", actionstr, msgbuf);
+			}			
 			return retval;
 		}
 	}
@@ -519,48 +544,48 @@ int packet_check_ip(const struct packet_info ip) {
 	 * calls because of the possibility they could screw with
 	 * msgbuf.  They shouldn't, really, but better safe than
 	 * sorry, at least for now. */
-	 
+
 	if (check_packet_list(&ip, whitelist) == 1) {
 		get_ip_string(&ip);
-		if (!conf.quiet)
-			logmsg(0, LOG_NOTICE, "[accept whitelist] [%s]", msgbuf);
+        if (!conf.quiet_wl)
+			logmsg(0, LOG_NOTICE, "%s [accept whitelist (%s)] [%s]", conf.name, rulemsgbuf, ipmsgbuf );
 		statics_pointer->whitelisthits++;
 		retval=NF_ACCEPT;
-		
+
 	} else
 	if (check_packet_list(&ip, blacklist) == 1) {
 		get_ip_string(&ip);
-		if (!conf.quiet)
-			logmsg(0, LOG_NOTICE, "[reject blacklist] [%s]", msgbuf);
+        if (!conf.quiet_bl)
+			logmsg(0, LOG_NOTICE, "%s [reject blacklist (%s)] [%s]", conf.name, rulemsgbuf, ipmsgbuf);
 		statics_pointer->blacklisthits++;
 		retval=NF_DROP;
-		
+
 	} else
 	if (check_packet_dnsbl(&ip, whitelistbl) == 1) {
 		get_ip_string(&ip);
-		if (!conf.quiet)
-			logmsg(0, LOG_NOTICE, "[accept dnsbl] [%s]", msgbuf);
+        if (!conf.quiet_wl)
+			logmsg(0, LOG_NOTICE, "%s [accept dnsbl (%s)] [%s]", conf.name, rulemsgbuf, ipmsgbuf);
 		statics_pointer->whitelistblhits++;
 		retval=NF_ACCEPT;
 
 	} else
 	if (check_packet_dnsbl(&ip, blacklistbl) == 1) {
 		get_ip_string(&ip);
-		if (!conf.quiet)
-			logmsg(0, LOG_NOTICE, "[reject dnsbl] [%s]", msgbuf);
+        if (!conf.quiet_bl)
+			logmsg(0, LOG_NOTICE, "%s [reject dnsbl (%s)] [%s]", conf.name, rulemsgbuf, ipmsgbuf);
 		statics_pointer->blacklistblhits++;
 		retval=NF_DROP;
-		
+
 	} else {
 		get_ip_string(&ip);
 		if (conf.default_accept == 1) {
-			if (!conf.quiet)
-				logmsg(0, LOG_INFO, "[accept fallthrough] [%s]", msgbuf);
+            if (!conf.quiet_wl)
+				logmsg(0, LOG_INFO, "%s [accept fallthrough] [%s]", conf.name, ipmsgbuf);
 			retval=NF_ACCEPT;
-		
+
 		} else {
-			if (!conf.quiet)
-				logmsg(0, LOG_INFO, "[reject fallthrough] [%s]", msgbuf);
+            if (!conf.quiet_bl)
+				logmsg(0, LOG_INFO, "%s [reject fallthrough] [%s]", conf.name, ipmsgbuf);
 			retval=NF_DROP;
 
 		}
@@ -586,7 +611,7 @@ void pbl_callback( void*arguments ) {
 
 	int ret=0;
 	struct nfqnl_msg_packet_hdr *ph=NULL;
-	
+
 	if (conf.debug>3)
 	{
 		pthread_mutex_lock(&lock_count);
@@ -595,24 +620,24 @@ void pbl_callback( void*arguments ) {
 		pthread_mutex_unlock(&lock_count);
 	}
 
-	// function parameters 
+	// function parameters
 	struct packet_info ip;
 	struct nfq_q_handle *qh = ((struct thr_arg *)arguments)->queue_handle;
 	int id = ((struct thr_arg *)arguments)->id;
-	
+
 	memcpy(&ip, &((struct thr_arg *)arguments)->ip, sizeof( struct packet_info ));
-	
+
 	free(arguments);
 	arguments=NULL;
 
 	ret = packet_check_ip(ip);
-	
+
 	if (ret == NF_ACCEPT || ret == NF_DROP)
 	{
-		logmsg(2, LOG_DEBUG, "Got packet from %hhu.%hhu.%hhu.%hhu: %d\n", ip.b1, ip.b2, ip.b3, ip.b4, ret);
+        logmsg(2, LOG_DEBUG, "Got packet from %hhu.%hhu.%hhu.%hhu: %d\n", ip.s_ip_b1, ip.s_ip_b2, ip.s_ip_b3, ip.s_ip_b4, ret);
 		pbl_set_verdict(qh, id, ret);
 	}
-	
+
 	if (conf.debug > 3)
 	{
 		pthread_mutex_lock(&lock_count);
@@ -642,8 +667,8 @@ static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	unsigned char *nfdata=NULL;
 #endif
 	struct packet_info ip;
-	
-	
+
+
 	ph = nfq_get_msg_packet_hdr(nfa);
 	if (ph != NULL ) {
 		id = ntohl(ph->packet_id);
@@ -677,7 +702,7 @@ static int callback_threads(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 		logmsg(0, LOG_ERR, "thr_arg malloc");
         return 1;
     }
-	
+
 	argp->queue_handle = qh;
 	argp->id = id;
 	memcpy(&argp->ip, &ip, sizeof( struct packet_info ));
@@ -761,20 +786,20 @@ int main(int argc, char **argv) {
 	struct stat fbuf;
 	int rv;
 	char work_directory[MAXBUF];
-	
+
 	pthread_attr_t	thr_attr;
 	pthread_t			thr;
-	
+
 #ifdef USE_NF_FAILOPEN
 	uint32_t flags = NFQA_CFG_F_FAIL_OPEN;
     uint32_t mask = NFQA_CFG_F_FAIL_OPEN;
 #endif
-	
+
 	struct thr_parameters  new_thr_arg;
 	new_thr_arg.thr = &thr;
 	new_thr_arg.thr_attr = &thr_attr;
 	thread_count=0;
-	
+
 	pthread_mutex_init(&lock_count, NULL);
 
 	// debug level
@@ -786,36 +811,25 @@ int main(int argc, char **argv) {
 		exit(EXIT_FAILURE);
 	}
 
-	
 	/* Parse execution arguments. */
 	parse_arguments(argc, argv);
 
 	/* Parse our configuration data. */
 	parse_config( );
 
-	if (conf.dryrun == 1 && conf.log_level<5) {
-		conf.log_level=5;
-	}
-
 	openlog("packetbl", LOG_PID, conf.log_facility);
-	
+
 	if ( arg_debug )
 		conf.debug=arg_debug;
 
 	if ( arg_quiet == 1 )
 		conf.quiet = 1;
 
-	
 	logmsg(0, LOG_DEBUG, "Debug level %d", conf.debug);
 	logmsg(0, LOG_DEBUG, "Linking to queue %d", conf.queueno);
 
-	if (conf.debug == 0) {
-		daemonize();
-	}
-
-#ifdef USE_SOCKSTAT
-	pbl_init_sockstat();
-#endif
+    if (conf.debug == 0)
+        daemonize();
 
 #ifdef USE_CACHE
 	if (packet_cache_len > 0) {
@@ -829,25 +843,25 @@ int main(int argc, char **argv) {
 	packet_cache_clear();
 #endif
 
-	// Creating alternative nameservers to do request directly to zevenet domain
+	// Creating alternative nameservers to do request directly to ZEVENET domain
 	if (conf.alt_domain && conf.alt_resolv_file)
 	{
 		getcwd(work_directory, sizeof(work_directory));
 		logmsg(0, LOG_DEBUG, "Loading nameserver file from: %s%s.", work_directory, conf.alt_resolv_file);
-	
+
 		// creating regexp to compare request domain with a specific domain
 		if ( regcomp(&regex, conf.alt_domain, 0) != 0 )
 		{
 			logmsg(0, LOG_ERR, "Create regexp failed");
 			exit(EXIT_FAILURE);
 		}
-		
-	}	
-	
+
+	}
+
 	/* thread stuff */
     pthread_attr_init(&thr_attr);
     pthread_attr_setdetachstate(&thr_attr, PTHREAD_CREATE_DETACHED);
-	
+
 	// initializing nfqueue
 	logmsg(2, LOG_DEBUG, "Creating nfq handle...");
 	if ((h = nfq_open()) == NULL) {
@@ -887,7 +901,7 @@ int main(int argc, char **argv) {
 		}
 		exit(EXIT_FAILURE);
 	}
-	
+
 	// configure a queue size
 	if (conf.queue_size)
 	{
@@ -898,7 +912,7 @@ int main(int argc, char **argv) {
 	}
 
 	logmsg(1, LOG_INFO, "packetbl started successfully");
-	
+
 	/* main packet processing loop.  This loop should never terminate
 	 * unless a signal is received or some other unforeseen thing
 	 * happens.
@@ -918,10 +932,10 @@ int main(int argc, char **argv) {
 			}
 		}
 		logmsg(2, LOG_DEBUG, "Packet got.");
-		statistics.totalpackets++;
+        statistics.totalpackets++;
 
 	}
-	
+
 }
 
 /*
@@ -974,12 +988,17 @@ int get_packet_info(unsigned char *payload, struct packet_info *ip) {
 		return -1;
 	}
 
+    /* source IP Address			Bytes 13 - 16 of IP header */
+    ip->s_ip_b1 = payload[12];
+    ip->s_ip_b2 = payload[13];
+    ip->s_ip_b3 = payload[14];
+    ip->s_ip_b4 = payload[15];
 
-	/* IP Address			Bytes 13 - 16 of IP header */
-	ip->b1 = payload[12];
-	ip->b2 = payload[13];
-	ip->b3 = payload[14];
-	ip->b4 = payload[15];
+    /* destination IP Address			Bytes 17 - 20 of IP header */
+    ip->d_ip_b1 = payload[16];
+    ip->d_ip_b2 = payload[17];
+    ip->d_ip_b3 = payload[18];
+    ip->d_ip_b4 = payload[19];
 
 	/* Source Port			Bytes 21 - 22 of IP Header
 	 *				Bytes 1 - 2 of TCP Header */
@@ -1031,8 +1050,7 @@ void parse_config( void ) {
 
 	configfile_t *configfilehandle;
 	struct bl_context context;
-	context.pool = pool_new(NULL);
-	
+
 	if ( packetbl_configfile == NULL )
 	{
 		configfilehandle = dotconf_create(CONFIGFILE, options, (void *)&context,
@@ -1043,19 +1061,18 @@ void parse_config( void ) {
 		configfilehandle = dotconf_create(packetbl_configfile, options, (void *)&context,
 			CASE_INSENSITIVE);
 	}
-	
+
 	if (!configfilehandle) {
 		fprintf(stderr, "Error opening config file\n");
 		exit(EXIT_FAILURE);
 	}
-	
+
 	if (dotconf_command_loop(configfilehandle) == 0) {
 		fprintf(stderr, "Error reading configuration file\n");
 		exit(EXIT_FAILURE);
 	}
 
 	dotconf_cleanup(configfilehandle);
-	pool_free(context.pool);
 
 	return;
 }
@@ -1183,19 +1200,27 @@ DOTCONF_CB(toggle_option) {
 		}
 		conf.queueno = cmd->data.value;
 		return NULL;
-	}	
+	}
 	if (strcasecmp(cmd->name, "queuesize") == 0) {
 		if (cmd->data.value < 0) {
-			logmsg(-1, LOG_ERR, "Error parsing config: queuesize cannot be a negative value\n"); 
+			logmsg(-1, LOG_ERR, "Error parsing config: queuesize cannot be a negative value\n");
 			exit(EXIT_FAILURE);
 		}
 		conf.queue_size = cmd->data.value;
 		return NULL;
-	}	
+	}
 	if (strcasecmp(cmd->name, "quiet") == 0) {
-		conf.quiet = cmd->data.value;
-		return NULL;
-	}	
+        conf.quiet_bl = conf.quiet_wl = conf.quiet = cmd->data.value;
+        return NULL;
+	}
+    if (strcasecmp(cmd->name, "quietwl") == 0) {
+        conf.quiet_wl = cmd->data.value;
+        return NULL;
+    }
+    if (strcasecmp(cmd->name, "quietbl") == 0) {
+        conf.quiet_bl = cmd->data.value;
+        return NULL;
+    }
 	if (strcasecmp(cmd->name, "loglevel") == 0) {
 		if (cmd->data.value < 0) {
 			logmsg(-1, LOG_ERR, "Error parsing config: loglevel cannot be a negative value\n");
@@ -1207,7 +1232,7 @@ DOTCONF_CB(toggle_option) {
 		}
 		conf.log_level = cmd->data.value;
 		return NULL;
-	}	
+	}
 	if (strcasecmp(cmd->name, "threadmax") == 0) {
 		if (cmd->data.value < 0) {
 			logmsg(-1, LOG_ERR, "Error parsing config: threadmax cannot be a negative value\n");
@@ -1215,13 +1240,13 @@ DOTCONF_CB(toggle_option) {
 		}
 		conf.threads_max = cmd->data.value;
 		return NULL;
-	}	
+	}
 	if (strcasecmp(cmd->name, "alternativedomain") == 0) {
 		size_t sizechain = 0;
 		conf.alt_domain = (char *)strdup(cmd->data.str);
 		sizechain = strlen(conf.alt_domain);
 		if (conf.alt_domain[sizechain-1] == '.') {
-		conf.alt_domain[sizechain-1]='\0';
+			conf.alt_domain[sizechain-1]='\0';
 		}
 		return NULL;
 	}
@@ -1230,7 +1255,7 @@ DOTCONF_CB(toggle_option) {
 		conf.alt_resolv_file = (char *)strdup(cmd->data.str);
 		sizechain = strlen(conf.alt_resolv_file);
 		if (conf.alt_resolv_file[sizechain-1] == '.') {
-		conf.alt_resolv_file[sizechain-1]='\0';
+			conf.alt_resolv_file[sizechain-1]='\0';
 		}
 		return NULL;
 	}
@@ -1307,7 +1332,7 @@ DOTCONF_CB(facility_option) {
 		logmsg(0, LOG_ERR, "Log facility %s is invalid\n", cmd->data.str);
 		exit(EXIT_FAILURE);
 	}
-	
+
 	return NULL;
 }
 
@@ -1315,7 +1340,7 @@ DOTCONF_CB(common_option) {
 
 	struct config_entry *ce, *tmp=NULL;
 #ifdef HAVE_FIREDNS
-	size_t blacklistlen = 0;
+	size_t sizechain = 0;
 #endif
 
 	ce =  malloc(sizeof(struct config_entry));
@@ -1326,12 +1351,22 @@ DOTCONF_CB(common_option) {
 	ce->string = (char *)strdup(cmd->data.str);
 	ce->next = NULL;
 
+	if (strcasecmp(cmd->name, "name") == 0) {
+		size_t sizechain = 0;
+		conf.name = (char *)strdup(cmd->data.str);
+        sizechain = strlen(conf.name);
+		if (conf.name[sizechain-1] == '.') {
+			conf.name[sizechain-1]='\0';
+		}
+		return NULL;
+    }
+
 	if (strcasecmp(cmd->name, "blacklistbl") == 0) {
 
 #ifdef HAVE_FIREDNS
-		blacklistlen = strlen(ce->string);
-		if (ce->string[blacklistlen-1] == '.') {
-			ce->string[blacklistlen-1]='\0';
+		sizechain = strlen(ce->string);
+		if (ce->string[sizechain-1] == '.') {
+			ce->string[sizechain-1]='\0';
 		}
 #endif
 
@@ -1348,9 +1383,9 @@ DOTCONF_CB(common_option) {
 	if (strcasecmp(cmd->name, "whitelistbl") == 0) {
 
 #ifdef HAVE_FIREDNS
-		blacklistlen = strlen(ce->string);
-		if (ce->string[blacklistlen-1] == '.') {
-			ce->string[blacklistlen-1]='\0';
+		sizechain = strlen(ce->string);
+		if (ce->string[sizechain-1] == '.') {
+			ce->string[sizechain-1]='\0';
 		}
 #endif
 
@@ -1407,7 +1442,7 @@ DOTCONF_CB(common_option) {
 }
 
 DOTCONF_CB(host_section_open) {
-	
+
 	struct bl_context *context = (struct bl_context *)ctx;
 	const char *old_end_token = context->current_end_token;
 	int old_override = context->permissions;
@@ -1422,10 +1457,10 @@ DOTCONF_CB(host_section_open) {
 			err = "</host> is missing";
 			break;
 		}
-	
+
 		if (err == context->current_end_token)
 			break;
-	
+
 		dotconf_warning(cmd->configfile, DCLOG_ERR, 0, err);
 	}
 
@@ -1469,8 +1504,8 @@ int parse_cidr(struct config_entry *ce) {
 
 	c1 = ce->string; // initialize state counter
 
-	for (counter = ce->string; 
-			(counter - ce->string) < (int)strlen(ce->string); 
+	for (counter = ce->string;
+			(counter - ce->string) < (int)strlen(ce->string);
 			counter++) {
 		switch (*counter) {
 			case '.':
@@ -1480,30 +1515,30 @@ int parse_cidr(struct config_entry *ce) {
 				number[(int)(counter - c1)] = '\0';
 				switch(sep) {
 					case 0:
-						ce->ip.b1 = atoi(number);
-						if (( ce->ip.b1 - 0)< 0 ||
-							ce->ip.b1 > 255) {
+                        ce->ip.s_ip_b1 = atoi(number);
+                        if (( ce->ip.s_ip_b1 - 0)< 0 ||
+                            ce->ip.s_ip_b1 > 255) {
 							return -1;
 						}
 						break;
 					case 1:
-						ce->ip.b2 = atoi(number);
-						if ((ce->ip.b2 - 0) < 0 ||
-							ce->ip.b2 > 255) {
+                        ce->ip.s_ip_b2 = atoi(number);
+                        if ((ce->ip.s_ip_b2 - 0) < 0 ||
+                            ce->ip.s_ip_b2 > 255) {
 							return -1;
 						}
 						break;
 					case 2:
-						ce->ip.b3 = atoi(number);
-						if (( ce->ip.b3 - 0) < 0 ||
-							ce->ip.b3 > 255) {
+                        ce->ip.s_ip_b3 = atoi(number);
+                        if (( ce->ip.s_ip_b3 - 0) < 0 ||
+                            ce->ip.s_ip_b3 > 255) {
 							return -1;
 						}
 						break;
 					case 3:
-						ce->ip.b4 = atoi(number);
-						if ((ce->ip.b4 - 0) < 0 ||
-							ce->ip.b4 > 255) {
+                        ce->ip.s_ip_b4 = atoi(number);
+                        if ((ce->ip.s_ip_b4 - 0) < 0 ||
+                            ce->ip.s_ip_b4 > 255) {
 							return -1;
 						}
 						break;
@@ -1527,7 +1562,7 @@ int parse_cidr(struct config_entry *ce) {
 				return -1;
 				break;
 		}
-	}		
+	}
 	strncpy (number, c1, (int)(counter - c1));
 	number[(int)(counter - c1)] = '\0';
 	ce->cidr.network = atoi(number);
@@ -1536,10 +1571,10 @@ int parse_cidr(struct config_entry *ce) {
 	ce->cidr.processed = 0xffffffff << (32 - ce->cidr.network);
 
 	ce->cidr.ip = 0;
-	ce->cidr.ip = ce->ip.b1 << 24;
-	ce->cidr.ip |= ce->ip.b2 << 16;
-	ce->cidr.ip |= ce->ip.b3 << 8;
-	ce->cidr.ip |= ce->ip.b4;
+    ce->cidr.ip = ce->ip.s_ip_b1 << 24;
+    ce->cidr.ip |= ce->ip.s_ip_b2 << 16;
+    ce->cidr.ip |= ce->ip.s_ip_b3 << 8;
+    ce->cidr.ip |= ce->ip.s_ip_b4;
 
 	/* Mask out the bits that aren't in the network in cidr.ip.
 	 * We don't care about them and they'll just confuse the issue. */
@@ -1549,29 +1584,11 @@ int parse_cidr(struct config_entry *ce) {
 
 }
 
-/*
- * this routine isn't necessary right now.
-int validate_blacklist(char *str) {
-
-	struct hostent *host;
-
-	assert(str != NULL);
-
-	host = gethostbyname(str);
-
-	if (host == NULL && h_errno != NETDB_SUCCESS) {
-		return -1;
-	}
-	
-	return 0;
-}
-*/
-
 
 /*
  * SYNOPSIS:
  *   int check_packet_dnsbl(
- *                          const struct packet_info 
+ *                          const struct packet_info
  *                          struct config_entry *list
  *                         );
  *
@@ -1594,7 +1611,6 @@ int validate_blacklist(char *str) {
 int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) {
 
 	struct config_entry *wltmp = NULL;
-	int aux;
 #ifdef	HAVE_FIREDNS
 	struct in_addr *host;
 #else
@@ -1607,13 +1623,13 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 	{
 		start_req = cur_time();
 	}
-						
+
 	if (ip == NULL || list == NULL) {
 		return 0;
 	}
 
 	wltmp = list;
-	
+
 	// Creating resolvers
 	ldns_resolver *res_opt=NULL;
 	ldns_resolver *res_def=NULL;
@@ -1631,26 +1647,26 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 			logmsg(0, LOG_ERR, "Create default nameservers failed");
 			return 0;
 		}
-	}	
+	}
 
 
 	while (1) {
 
 		char lookupbuf[BUFFERSIZE];
-	
-		snprintf(lookupbuf, sizeof(lookupbuf), "%hhu.%hhu.%hhu.%hhu.%s", ip->b4, ip->b3, ip->b2, ip->b1,
+
+        snprintf(lookupbuf, sizeof(lookupbuf), "%hhu.%hhu.%hhu.%hhu.%s", ip->s_ip_b4, ip->s_ip_b3, ip->s_ip_b2, ip->s_ip_b1,
 			wltmp->string);
 
 
-		if( regexec(&regex, wltmp->string, (size_t) 0, NULL, 0) != REG_NOMATCH ) 
+		if( regexec(&regex, wltmp->string, (size_t) 0, NULL, 0) != REG_NOMATCH )
 		{
 			logmsg(1, LOG_DEBUG, "Sending to optional DNS");
 
 			if (dns_query(res_opt,lookupbuf))
 			{
 				// found
-				logmsg(-1, LOG_NOTICE, "The IP %hhu.%hhu.%hhu.%hhu was found in the domain %s",	ip->b4, ip->b3, ip->b2, ip->b1,
-					wltmp->string);
+				snprintf(rulemsgbuf, sizeof(rulemsgbuf), "%s",
+					(strlen(wltmp->string) < sizeof(rulemsgbuf)) ? wltmp->string : "-");
 				if (conf.debug > 1)
 				{
 					end_req = cur_time();
@@ -1663,7 +1679,7 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 		}
 		else
 		{
-			
+
 			logmsg(-1, LOG_DEBUG, "Sending to default DNS");
 #ifndef HAVE_FIREDNS
 			if (!dns_query(res_def,lookupbuf) ) {
@@ -1674,8 +1690,8 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 				;
 			} else {
 				// found.
-				logmsg(-1, LOG_NOTICE, "The IP %hhu.%hhu.%hhu.%hhu was found in the domain %s",	ip->b4, ip->b3, ip->b2, ip->b1,
-					wltmp->string);
+				snprintf(rulemsgbuf, sizeof(rulemsgbuf), "%s",
+					(strlen(wltmp->string) < sizeof(rulemsgbuf)) ? wltmp->string : "-");
 				if (conf.debug > 1)
 				{
 					end_req = cur_time();
@@ -1686,7 +1702,7 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 				return 1;
 			}
 		}
-		
+
 		if (wltmp->next == NULL) {
 			/* Termination case */
 			if (conf.debug > 1)
@@ -1706,7 +1722,7 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
 		end_req = cur_time();
 		logmsg(1, LOG_DEBUG, "finish tread, thread time (%.3f sec)",	(end_req - start_req) / 1000000.0);
 	}
-	
+
 	ldns_resolver_deep_free(res_opt);
 	ldns_resolver_deep_free(res_def);
 	return 0;
@@ -1720,7 +1736,7 @@ int check_packet_dnsbl(const struct packet_info *ip, struct config_entry *list) 
  *                         );
  *
  * ARGUMENTS:
- *   struct packet_info *ip       IP address data to check in supplied list. 
+ *   struct packet_info *ip       IP address data to check in supplied list.
  *   struct config_entry *list    List that contains data to check in against,
  *                                whitelist for example.
  *
@@ -1746,11 +1762,11 @@ int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 		return 0;
 	}
 
-	ip_proc = ip->b1 << 24;
-	ip_proc |= ip->b2 << 16;
-	ip_proc |= ip->b3 << 8;
-	ip_proc |= ip->b4;
-	
+    ip_proc = ip->s_ip_b1 << 24;
+    ip_proc |= ip->s_ip_b2 << 16;
+    ip_proc |= ip->s_ip_b3 << 8;
+    ip_proc |= ip->s_ip_b4;
+
 	wltmp = list;
 
 	while (1) {
@@ -1759,9 +1775,8 @@ int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 		p &= wltmp->cidr.processed;
 
 		if (p == wltmp->cidr.ip) {
-			snprintf(msgbuf, sizeof(msgbuf), "%hhu.%hhu.%hhu.%hhu %x/%d",
-				ip->b1, ip->b2, ip->b3, ip->b4,
-				wltmp->cidr.ip, wltmp->cidr.network);
+            snprintf(rulemsgbuf, sizeof(rulemsgbuf), "%s",
+                wltmp->string);
 			return 1;
 		}
 
@@ -1796,168 +1811,12 @@ int check_packet_list(const struct packet_info *ip, struct config_entry *list) {
 static void get_ip_string(const struct packet_info *ip) {
 
 	if (ip == NULL) {
-		sprintf(msgbuf, "-");
+		sprintf(ipmsgbuf, "-");
 		return;
 	}
 
-	snprintf(msgbuf, sizeof(msgbuf), "%hhu.%hhu.%hhu.%hhu:%d.%d", ip->b1, 
-		ip->b2, ip->b3, ip->b4,
-		ip->s_port,ip->d_port);
+    snprintf(ipmsgbuf, sizeof(ipmsgbuf), "%hhu.%hhu.%hhu.%hhu:%d-%hhu.%hhu.%hhu.%hhu:%d",
+        ip->s_ip_b1, ip->s_ip_b2, ip->s_ip_b3, ip->s_ip_b4, ip->s_port,
+        ip->d_ip_b1, ip->d_ip_b2, ip->d_ip_b3, ip->d_ip_b4, ip->d_port);
 	return;
 }
-
-#ifdef USE_SOCKSTAT
-/*
- * SYNOPSIS:
- *   void *pbl_sockstat_thread(
- *                             void *tdata
- *                            );
- *
- * ARGUMENTS:
- *   void *tdata                  Data to pass into the thread.  This is unused
- *                                currently.
- *
- * RETURN VALUE:
- *   This function always returns NULL.
- *
- * NOTES:
- */
-void *pbl_sockstat_thread(void *tdata) {
-	struct sockaddr_un sockinfo;
-	FILE *sockfp = NULL;
-	char buf[1024]={0};
-	time_t current_time;
-	int master_sockfd, sockfd;
-	int bindret, listenret, snprintfret;
-	int sockinfolen;
-
-	/* Delete any stray sockets left lying around. */
-	unlink(SOCKSTAT_PATH);
-
-	/* Create a UNIX domain socket. */
-	master_sockfd = socket(PF_UNIX, SOCK_STREAM, 0);
-	if (master_sockfd < 0) {
-		logmsg(-1, LOG_ERR, "Error creating socket: %s",
-			strerror(errno));
-		pthread_exit(NULL);
-	}
-
-	/* Bind our socket to the pathname. */
-	sockinfo.sun_family = AF_UNIX;
-	strncpy(sockinfo.sun_path, SOCKSTAT_PATH, sizeof(sockinfo.sun_path));
-	bindret = bind(master_sockfd, 
-		(struct sockaddr *) &sockinfo, sizeof(sockinfo));
-	if (bindret < 0) {
-		logmsg(-1, LOG_ERR, "Error binding to socket: %s",
-			strerror(errno));
-		if (close(master_sockfd) < 0) {
-			logmsg(-1, LOG_ERR, "%s:%d close() failed: %s",
-				__FILE__,__LINE__, strerror(errno));
-		}
-		pthread_exit(NULL);
-	}
-
-	/* Start listening for connections. */
-	listenret = listen(master_sockfd, 3);
-	if (listenret < 0) {
-		logmsg(-1, LOG_ERR, "Error listening on socket: %s",
-			strerror(errno));
-		if (close(master_sockfd) < 0) {
-			logmsg(-1, LOG_ERR, "%s:%d close() failed: %s",
-				__FILE__,__LINE__, strerror(errno));
-		}
-		if (unlink(SOCKSTAT_PATH) < 0) {
-			logmsg(-1, LOG_ERR, "%s:%d removing socket failed: %s",
-				__FILE__,__LINE__, strerror(errno));
-		}
-		pthread_exit(NULL);
-	}
-
-	current_time = time(NULL);
-	ctime_r(&current_time, buf);
-
-	while (1) {
-		sockinfolen = sizeof(sockinfo);
-
-		sockfd = accept(master_sockfd, 
-			(struct sockaddr *) &sockinfo, &sockinfolen);
-
-		if (sockfd < 0) continue;
-
-		sockfp = fdopen(sockfd, "w");
-		if (sockfp == NULL) {
-			if (close(sockfd) < 0) {
-				logmsg(-1, LOG_ERR, "%s:%d close() failed: %s",
-					__FILE__,__LINE__, strerror(errno));
-			}
-			continue;
-		}
-
-		fprintf(sockfp, "Running since: %s", buf);
-		fprintf(sockfp, "Statistics:\n");
-		fprintf(sockfp, "  Cache hits (accept): %d\n", 
-			statistics.cacheaccept);
-		fprintf(sockfp, "  Cache hits (reject): %d\n", 
-			statistics.cachereject);
-		fprintf(sockfp, "  DNS Whitelist hits: %d\n", 
-			statistics.whitelistblhits);
-		fprintf(sockfp, "  DNS Blacklist hits: %d\n", 
-			statistics.blacklistblhits);
-		fprintf(sockfp, "  Whitelist hits: %d\n", 
-			statistics.whitelisthits);
-		fprintf(sockfp, "  Blacklist hits: %d\n", 
-			statistics.blacklisthits);
-		fprintf(sockfp, "  Fall through hits: %d\n", 
-			statistics.fallthroughhits);
-		fprintf(sockfp, "  Total packets: %d\n", 
-			statistics.totalpackets);
-		fclose(sockfp);
-	}
-
-	close(master_sockfd);
-	if (close(master_sockfd) < 0) {
-		logmsg(-1, LOG_ERR, "%s:%d close() failed: %s",
-			__FILE__,__LINE__, strerror(errno));
-	}
-
-	/* Cleanup sockets. */
-	if (unlink(SOCKSTAT_PATH) < 0) {
-		logmsg(-1, LOG_ERR, "%s:%d removing socket failed: %s",
-			__FILE__,__LINE__, strerror(errno));
-	}
-
-	/* Terminate our thread without taking down the entire process. */
-	pthread_exit(NULL);
-
-	/* This should never be reached. */
-	return(NULL);
-}
-
-/*
- * SYNOPSIS:
- *   void pbl_init_sockstat(void);
- *
- * ARGUMENTS:
- *   (none)
- *
- * RETURN VALUE:
- *   (none)
- *
- * NOTES:
- */
-void pbl_init_sockstat(void) {
-	pthread_t pthread_data;
-	int pthread_ret = 0;
-
-	/* Create the thread to handle socket requests. */
-	pthread_ret = pthread_create(
-		&pthread_data, NULL, pbl_sockstat_thread, NULL);
-	if (pthread_ret < 0) {
-		logmsg(-1, LOG_ERR, "pthread_create failed: %s", strerror(errno));
-	}
-
-	return;
-}
-
-#endif
-
