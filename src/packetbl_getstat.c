@@ -9,7 +9,9 @@
 
 
 #ifdef USE_SOCKSTAT
-int main(int argc, char **argv) {
+int
+main(int argc, char **argv)
+{
 	struct sockaddr_un sockinfo;
 	char *socketpath = SOCKSTAT_PATH;
 	char buf[1024];
@@ -35,7 +37,9 @@ int main(int argc, char **argv) {
 	sockinfo.sun_family = AF_UNIX;
 	strncpy(sockinfo.sun_path, socketpath, sizeof(sockinfo.sun_path));
 
-	connectret = connect(sockfd, (struct sockaddr *) &sockinfo, sizeof(sockinfo));
+	connectret =
+		connect(sockfd, (struct sockaddr *) &sockinfo,
+			sizeof(sockinfo));
 	if (connectret < 0) {
 		perror("connect");
 		exit(EXIT_FAILURE);
@@ -44,7 +48,8 @@ int main(int argc, char **argv) {
 	/* Read all the data available. */
 	while (1) {
 		readret = read(sockfd, buf, sizeof(buf));
-		if (readret <= 0) break;
+		if (readret <= 0)
+			break;
 		write(STDOUT_FILENO, buf, readret);
 	}
 
@@ -55,9 +60,11 @@ int main(int argc, char **argv) {
 }
 
 #else
-int main() {
-	fprintf(stderr, "PacketBL was not compiled with socket statistics support!\n");
+int
+main()
+{
+	fprintf(stderr,
+		"PacketBL was not compiled with socket statistics support!\n");
 	return 1;
 }
 #endif
-
