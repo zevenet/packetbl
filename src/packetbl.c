@@ -386,8 +386,8 @@ daemonize(void)
 				fprintf(pidf, "%d\n", (int) pid);
 				fclose(pidf);
 			}
-			exit(EXIT_SUCCESS);
 		}
+		exit(EXIT_SUCCESS);
 	}
 	if (pid < 0) {
 		logmsg(0, LOG_ERR, "Fork failed while daemonizing: %s",
