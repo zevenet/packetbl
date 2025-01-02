@@ -319,7 +319,7 @@ All reported bugs, new feature and patches are welcome.
 Please use the [GitHub project Issues](https://github.com/zevenet/packetbl/issues) to report any issue or bug with the software. Try to describe the problem and a way to reproduce it. It'll be useful to attach the service and network configurations as well as system and services logs.
 
 
-## [www.zevenet.com](https://www.zevenet.com)
+## [www.relianoid.com](https://www.relianoid.com)
 
 
 
